@@ -1,0 +1,10 @@
+node_modules/
+dist/
+release/
+.build-tools/
+.pnpm-store/
+package-lock.json
+.env
+.env.*
+!.env.example
+*.log
