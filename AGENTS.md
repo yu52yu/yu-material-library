@@ -15,6 +15,8 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 
 ## Product direction
 
+- This is a local asset library. Cross-computer delivery only needs the application and its generic folder-creation workflow to install and run correctly. Each computer chooses its own folders and names its own projects/categories. Do not transfer or prepopulate this machine's folder names, paths, materials, favorites, notes, or settings on another computer; migration/sync is not a requested feature. Prioritize the correctness of the existing library framework and preserve its working features.
+
 - Desktop libraries use native filesystem change notifications and update only changed paths, with no periodic or focus-triggered full scans. Initial loading and explicit refresh read the directory. Preserve browsing/selection state and invalidate image previews after overwrite saves. Users can save from creative tools straight into connected project/category folders.
 
 - Project file categories accept custom names in the organizer, offer existing categories, and retain custom folder categories when rescanning both managed and linked projects.
