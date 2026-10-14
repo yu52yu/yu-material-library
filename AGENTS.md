@@ -1,5 +1,10 @@
 # Prototype Instructions
 
+## Documentation maintenance
+
+- Keep `README.md`, `安装说明.md`, `使用说明.md`, `开发日志.md`, and `需求记录.md` current when features, requirements, validation, or delivery change. Append dated records using Asia/Shanghai dates, recording only verified changes, user decisions, and results.
+- Distinguish the source version on `main` from the installer version actually published in GitHub Releases. A source upload does not publish an installer. Keep the download steps usable on a fresh computer and state that materials and local settings do not sync through the source repository.
+
 Run the local server yourself and open the preview in the browser available to this environment. Do not give the user server-start instructions when you can run it.
 
 Before making substantial visual changes, use the Product Design plugin's `get-context` skill when the visual source is unclear or no longer matches the current goal. When the user gives durable prototype-specific design feedback, preferences, or decisions, record them in `AGENTS.md`.
@@ -20,7 +25,7 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 
 - Product name: `瑜の素材库`.
 - Keep the information architecture intentionally shallow: reusable `素材` split into `下载素材` and `AI制作素材`; project content split by project, then `参考素材` and `制作素材`, with `源文件/PS源文件`, `详情页`, and `渲染图`.
-- The selected visual direction is a light, thumbnail-first creative desktop tool with warm off-white surfaces, graphite typography, restrained forest-green accents, and a modern knight shield/helmet identity.
+- The selected visual direction is a light, thumbnail-first creative desktop tool with pearl-white and silver-gray surfaces, graphite typography, restrained blue-gray accents, and a silver/titanium knight shield/helmet identity.
 - Avoid game-like fantasy styling, decorative dashboard features, and deep folder trees.
 - The user explicitly wants their own computer files to populate the library. Do not generate or bundle demo material thumbnails; the app must read real selected folders/files and show an honest empty state before import. The approved generated knight crest is the only product image asset.
 - Deliver as a Windows desktop application. Use the approved knight logo for the executable, installer, taskbar, and desktop shortcut. Folder indexing is read-only; explicit file import copies to 待整理 without overwriting originals.
