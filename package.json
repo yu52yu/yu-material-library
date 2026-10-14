@@ -1,6 +1,6 @@
 {
   "name": "yu-material-library",
-  "version": "0.11.5",
+  "version": "0.11.6",
   "description": "瑜的本地设计素材管理库",
   "author": "Yu",
   "packageManager": "pnpm@11.19.0",

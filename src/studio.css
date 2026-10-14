@@ -166,5 +166,14 @@ button:disabled { cursor: default; opacity: .45; }
 
 .asset-name-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .asset-name-row .asset-name { flex: 1; min-width: 0; }
-.file-rename { flex: 0 0 26px; height: 26px; display: grid; place-items: center; border: 0; border-radius: 5px; color: #66717c; background: transparent; cursor: pointer; }
+.file-rename, .file-delete { flex: 0 0 26px; height: 26px; display: grid; place-items: center; border: 0; border-radius: 5px; color: #66717c; background: transparent; cursor: pointer; }
 .file-rename:hover, .file-rename:focus-visible { background: #e5e9ee; color: #283747; }
+.file-delete { color: #94524c; }
+.file-delete:hover, .file-delete:focus-visible { background: #f8e9e6; color: #8a332b; }
+.delete-file-list { list-style: none; max-height: 210px; overflow: auto; margin: 0 0 16px; padding: 0; border: 1px solid var(--line); border-radius: 9px; }
+.delete-file-list li { padding: 10px 12px; }
+.delete-file-list li + li { border-top: 1px solid var(--line); }
+.delete-file-list strong, .delete-file-list span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.delete-file-list strong { font-size: 13px; font-weight: 600; }
+.delete-file-list span { margin-top: 4px; color: var(--muted); font-size: 11px; }
+.delete-error { max-height: 120px; overflow: auto; color: #8a332b; font-size: 13px; line-height: 1.6; }

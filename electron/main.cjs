@@ -13,7 +13,7 @@ const {
   renameFile,
   organizeFiles,
   scanLibrary,
-  validateFilesInsideRoot,
+  trashFiles,
 } = require("./library.cjs");
 
 protocol.registerSchemesAsPrivileged([{
@@ -159,11 +159,9 @@ function registerIpc() {
   ipcMain.handle("library:rename-file", async (_event, rootPath, filePath, name) => renameFile(rootPath, filePath, name));
   ipcMain.handle("library:organize-file", async (_event, rootPath, filePath, target) => organizeFile(rootPath, filePath, target));
   ipcMain.handle("library:organize-files", async (_event, rootPath, filePaths, target) => organizeFiles(rootPath, filePaths, target));
-  ipcMain.handle("library:trash-files", async (_event, rootPath, filePaths) => {
-    const validated = await validateFilesInsideRoot(rootPath, filePaths);
-    for (const filePath of validated) await shell.trashItem(filePath);
-    return validated;
-  });
+  ipcMain.handle("library:trash-files", async (_event, rootPath, filePaths) => (
+    trashFiles(rootPath, filePaths, (filePath) => shell.trashItem(filePath))
+  ));
 
   ipcMain.handle("system:open-path", async (_event, filePath) => {
     if (!filePath || !fs.existsSync(filePath)) throw new Error("文件不存在或已移动");

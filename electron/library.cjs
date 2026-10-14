@@ -112,17 +112,64 @@ async function scanLibrary(rootPath) {
   };
 }
 
-async function validateFilesInsideRoot(rootPath, filePaths) {
-  const root = await assertDirectory(rootPath);
-  const validated = [];
-  for (const filePath of filePaths || []) {
-    const resolved = path.resolve(filePath);
-    if (!isInside(root, resolved) || resolved === root) throw new Error("只能删除当前素材库中的文件");
-    const stat = await fs.promises.stat(resolved).catch(() => null);
-    if (!stat?.isFile()) throw new Error("文件不存在或已经移动");
-    validated.push(resolved);
+async function prepareFilesForDeletion(rootPath, filePaths) {
+  if (typeof rootPath !== "string" || !rootPath.trim() || !path.isAbsolute(rootPath) || rootPath.includes("\0")) {
+    throw new Error("请先选择有效的素材库或项目文件夹");
   }
-  return validated;
+  if (!Array.isArray(filePaths) || filePaths.some((filePath) => (
+    typeof filePath !== "string" || !filePath.trim() || !path.isAbsolute(filePath) || filePath.includes("\0")
+  ))) throw new Error("删除文件路径无效");
+
+  const root = await assertDirectory(rootPath);
+  const realRoot = await fs.promises.realpath(root);
+  const validated = [];
+  const seen = new Set();
+  for (const filePath of filePaths) {
+    const resolved = path.resolve(filePath);
+    const key = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (!isInside(root, resolved) || path.relative(root, resolved) === "") throw new Error("只能删除当前素材库中的文件");
+    const stat = await fs.promises.lstat(resolved).catch(() => null);
+    if (!stat?.isFile()) throw new Error("文件不存在、已经移动或不是普通文件");
+    const realPath = await fs.promises.realpath(resolved);
+    if (!isInside(realRoot, realPath) || path.relative(realRoot, realPath) === "") {
+      throw new Error("只能删除当前素材库中的文件");
+    }
+    validated.push({ path: resolved, realPath, dev: stat.dev, ino: stat.ino });
+  }
+  return { realRoot, files: validated };
+}
+
+async function validateFilesInsideRoot(rootPath, filePaths) {
+  return (await prepareFilesForDeletion(rootPath, filePaths)).files.map((file) => file.path);
+}
+
+async function trashFiles(rootPath, filePaths, trashItem) {
+  if (typeof trashItem !== "function") throw new Error("回收站服务不可用");
+  // Validate the entire request before changing any file, including real paths
+  // behind junctions. Invalid selections must never partially mutate a library.
+  const prepared = await prepareFilesForDeletion(rootPath, filePaths);
+  const deleted = [];
+  const failed = [];
+  for (const file of prepared.files) {
+    try {
+      // Earlier recycle-bin operations may take time; a queued file can vanish
+      // or be replaced while the batch is running. Recheck before handing its
+      // original path to the OS, and never fall back to permanent deletion.
+      const current = await prepareFilesForDeletion(rootPath, [file.path]);
+      const currentFile = current.files[0];
+      if (current.realRoot !== prepared.realRoot || currentFile.realPath !== file.realPath
+        || currentFile.dev !== file.dev || currentFile.ino !== file.ino) {
+        throw new Error("文件或所在文件夹已经变化，请刷新后再试");
+      }
+      await trashItem(file.path);
+      deleted.push(file.path);
+    } catch (error) {
+      failed.push({ path: file.path, message: error?.message || "无法将文件移入回收站，请稍后重试" });
+    }
+  }
+  return { deleted, failed };
 }
 
 function targetDirectoryForArea(root, area, category) {
@@ -247,5 +294,6 @@ module.exports = {
   organizeFile,
   organizeFiles,
   scanLibrary,
+  trashFiles,
   validateFilesInsideRoot,
 };

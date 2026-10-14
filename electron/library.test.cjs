@@ -11,6 +11,7 @@ const {
   organizeFile,
   organizeFiles,
   scanLibrary,
+  trashFiles,
   validateFilesInsideRoot,
 } = require("./library.cjs");
 
@@ -185,6 +186,137 @@ test("only validates files contained by the selected library for deletion", asyn
 
   assert.deepEqual(await validateFilesInsideRoot(root, [inside]), [inside]);
   await assert.rejects(() => validateFilesInsideRoot(root, [outside]), /只能删除当前素材库中的文件/);
+});
+
+test("trashes pictures in managed libraries and direct projects through the provided recycle-bin service", async (context) => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "yu-trash-projects-"));
+  context.after(() => fs.promises.rm(root, { recursive: true, force: true }));
+  const recycled = path.join(root, "recycled");
+  await fs.promises.mkdir(recycled);
+
+  for (const managed of [true, false]) {
+    const selectedRoot = path.join(root, managed ? "managed" : "linked-project");
+    if (managed) await ensureLibraryStructure(selectedRoot);
+    const directory = managed
+      ? path.join(selectedRoot, "02_项目素材", "喂鱼器", "制作素材", "渲染图")
+      : path.join(selectedRoot, "参考素材", "图片");
+    await fs.promises.mkdir(directory, { recursive: true });
+    const file = path.join(directory, managed ? "managed.png" : "linked.png");
+    await fs.promises.writeFile(file, "image contents");
+    const calls = [];
+    const result = await trashFiles(selectedRoot, [file, file], async (filePath) => {
+      calls.push(filePath);
+      await fs.promises.rename(filePath, path.join(recycled, path.basename(filePath)));
+    });
+
+    assert.deepEqual(result, { deleted: [file], failed: [] });
+    assert.deepEqual(calls, [file]);
+    assert.equal(fs.existsSync(file), false);
+    assert.equal(await fs.promises.readFile(path.join(recycled, path.basename(file)), "utf8"), "image contents");
+  }
+});
+
+test("reports partial recycle-bin failures and continues without permanently deleting failed files", async (context) => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "yu-trash-partial-"));
+  context.after(() => fs.promises.rm(root, { recursive: true, force: true }));
+  const locked = path.join(root, "locked.png");
+  const available = path.join(root, "available.png");
+  await fs.promises.writeFile(locked, "locked");
+  await fs.promises.writeFile(available, "available");
+  const calls = [];
+
+  const result = await trashFiles(root, [locked, available], async (filePath) => {
+    calls.push(filePath);
+    if (filePath === locked) throw new Error("文件被 Photoshop 占用");
+    await fs.promises.rename(filePath, `${filePath}.recycled`);
+  });
+
+  assert.deepEqual(result, {
+    deleted: [available],
+    failed: [{ path: locked, message: "文件被 Photoshop 占用" }],
+  });
+  assert.deepEqual(calls, [locked, available]);
+  assert.equal(await fs.promises.readFile(locked, "utf8"), "locked");
+  assert.equal(await fs.promises.readFile(`${available}.recycled`, "utf8"), "available");
+});
+
+test("rejects malformed requests, directories, and outside files before invoking the recycle bin", async (context) => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "yu-trash-invalid-"));
+  context.after(() => fs.promises.rm(root, { recursive: true, force: true }));
+  const selectedRoot = path.join(root, "project");
+  await fs.promises.mkdir(selectedRoot);
+  const inside = path.join(selectedRoot, "inside.png");
+  const outside = path.join(root, "outside.png");
+  await fs.promises.writeFile(inside, "inside");
+  await fs.promises.writeFile(outside, "outside");
+  let called = false;
+  const recycle = async () => { called = true; };
+
+  for (const [deletionRoot, paths] of [
+    [null, [inside]], ["", [inside]], ["relative-root", [inside]],
+    [inside, [inside]], [path.join(root, "missing"), [inside]],
+    [selectedRoot, null], [selectedRoot, inside], [selectedRoot, [inside, null]],
+    [selectedRoot, [inside, "relative.png"]], [selectedRoot, [inside, ""]],
+    [selectedRoot, [inside, outside]], [selectedRoot, [inside, selectedRoot]],
+    [selectedRoot, [inside, path.join(selectedRoot, "missing.png")]],
+  ]) {
+    await assert.rejects(() => trashFiles(deletionRoot, paths, recycle));
+  }
+
+  assert.equal(called, false);
+  assert.equal(await fs.promises.readFile(inside, "utf8"), "inside");
+  assert.equal(await fs.promises.readFile(outside, "utf8"), "outside");
+  assert.deepEqual(await trashFiles(selectedRoot, [], recycle), { deleted: [], failed: [] });
+});
+
+test("blocks deletion through a junction that escapes the selected project but accepts a linked root", async (context) => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "yu-trash-junction-"));
+  context.after(() => fs.promises.rm(root, { recursive: true, force: true }));
+  const selectedRoot = path.join(root, "project");
+  const outsideRoot = path.join(root, "outside");
+  await fs.promises.mkdir(selectedRoot);
+  await fs.promises.mkdir(outsideRoot);
+  const inside = path.join(selectedRoot, "inside.png");
+  const outside = path.join(outsideRoot, "outside.png");
+  await fs.promises.writeFile(inside, "inside");
+  await fs.promises.writeFile(outside, "outside");
+  const junction = path.join(selectedRoot, "junction");
+  const linkedRoot = path.join(root, "linked-root");
+  await fs.promises.symlink(outsideRoot, junction, "junction");
+  await fs.promises.symlink(selectedRoot, linkedRoot, "junction");
+  const calls = [];
+  const recycle = async (filePath) => { calls.push(filePath); };
+
+  await assert.rejects(() => trashFiles(selectedRoot, [inside, path.join(junction, "outside.png")], recycle), /只能删除/);
+  assert.deepEqual(calls, []);
+  const linkedImage = path.join(linkedRoot, "inside.png");
+  assert.deepEqual(await trashFiles(linkedRoot, [linkedImage], recycle), { deleted: [linkedImage], failed: [] });
+  assert.deepEqual(calls, [linkedImage]);
+  assert.equal(await fs.promises.readFile(outside, "utf8"), "outside");
+});
+
+test("rechecks queued pictures that disappear or are replaced during a batch", async (context) => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "yu-trash-race-"));
+  context.after(() => fs.promises.rm(root, { recursive: true, force: true }));
+  const files = ["first.png", "gone.png", "replaced.png", "last.png"].map((name) => path.join(root, name));
+  for (const file of files) await fs.promises.writeFile(file, "original");
+  const calls = [];
+  const result = await trashFiles(root, files, async (filePath) => {
+    calls.push(filePath);
+    if (filePath === files[0]) {
+      await fs.promises.unlink(files[1]);
+      await fs.promises.rename(files[2], `${files[2]}.old`);
+      await fs.promises.writeFile(files[2], "new content");
+    }
+    await fs.promises.rename(filePath, `${filePath}.recycled`);
+  });
+
+  assert.deepEqual(result.deleted, [files[0], files[3]]);
+  assert.deepEqual(result.failed.map((failure) => failure.path), [files[1], files[2]]);
+  assert.match(result.failed[0].message, /文件不存在/);
+  assert.match(result.failed[1].message, /已经变化/);
+  assert.deepEqual(calls, [files[0], files[3]]);
+  assert.equal(await fs.promises.readFile(files[2], "utf8"), "new content");
 });
 const { renameFile } = require('./library.cjs');
 test('rename preserves contents and rejects collisions and invalid names', async (context) => {

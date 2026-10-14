@@ -321,7 +321,7 @@ function FilePreview({ item, compact = false }) {
   );
 }
 
-function AssetCard({ item, selected, favorite, view, onSelect, onToggleSelection, onFavorite, onOpen, onRename, onDragFile }) {
+function AssetCard({ item, selected, favorite, view, onSelect, onToggleSelection, onFavorite, onOpen, onRename, onDelete, canDelete, onDragFile }) {
   return (
     <article
       className={`asset-card ${selected ? "selected" : ""} ${view === "list" ? "list-card" : ""}`}
@@ -332,7 +332,9 @@ function AssetCard({ item, selected, favorite, view, onSelect, onToggleSelection
       onDragStart={(event) => onDragFile(item, event)}
       tabIndex={0}
       onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
         if (event.key === "Enter" || event.key === " ") onSelect(item, event);
+        if (event.key === "Delete" && canDelete) { event.preventDefault(); onDelete(item, selected); }
       }}
       aria-label={`${item.name}，${item.type}`}
     >
@@ -349,7 +351,11 @@ function AssetCard({ item, selected, favorite, view, onSelect, onToggleSelection
         {item.type === "BLEND" && <span className="file-badge blend">Bl</span>}
       </div>
       <div className="asset-copy">
-        <div className="asset-name-row"><div className="asset-name" title={item.name}>{item.name}</div>{DESKTOP && <button className="file-rename" title="重命名" aria-label={`重命名 ${item.name}`} onDoubleClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRename(item); }}><PencilSimple size={15} /></button>}</div>
+        <div className="asset-name-row">
+          <div className="asset-name" title={item.name}>{item.name}</div>
+          {DESKTOP && <button className="file-rename" title="重命名" aria-label={`重命名 ${item.name}`} onDoubleClick={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRename(item); }}><PencilSimple size={15} /></button>}
+          {canDelete && <button className="file-delete" title="删除（移到回收站）" aria-label={`删除 ${item.name}`} onDoubleClick={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onDelete(item); }}><Trash size={15} /></button>}
+        </div>
         <div className="asset-type">{item.type} · {item.size}</div>
       </div>
       <button
@@ -358,6 +364,45 @@ function AssetCard({ item, selected, favorite, view, onSelect, onToggleSelection
         onClick={(event) => { event.stopPropagation(); onToggleSelection(item); }}
       >{selected && <CheckCircle size={21} weight="fill" />}</button>
     </article>
+  );
+}
+
+function DeleteDialog({ items, busy, error, onClose, onConfirm }) {
+  const dialogRef = useRef(null);
+  const cancelRef = useRef(null);
+  useEffect(() => {
+    const previousFocus = document.activeElement;
+    cancelRef.current?.focus();
+    return () => {
+      if (previousFocus?.isConnected) previousFocus.focus();
+      else document.querySelector(".asset-card, .searchbox input")?.focus();
+    };
+  }, []);
+  useEffect(() => {
+    // Disabled buttons lose focus in Chromium; keep keyboard input inside the modal.
+    if (busy) dialogRef.current?.focus();
+    else if (document.activeElement === dialogRef.current) cancelRef.current?.focus();
+  }, [busy]);
+  return (
+    <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
+      <section ref={dialogRef} tabIndex={-1} className="organize-dialog delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-note" aria-busy={busy} onKeyDown={(event) => {
+        if (event.key === "Escape") { event.preventDefault(); if (!busy) onClose(); }
+        if (event.key === "Tab") {
+          const buttons = [...dialogRef.current.querySelectorAll("button:not([disabled])")];
+          if (!buttons.length) { event.preventDefault(); return; }
+          const first = buttons[0];
+          const last = buttons.at(-1);
+          if (event.shiftKey && (document.activeElement === first || document.activeElement === dialogRef.current)) { event.preventDefault(); last.focus(); }
+          else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+        }
+      }}>
+        <div className="dialog-heading"><div><h2 id="delete-title">删除{items.length > 1 ? "所选素材" : "素材"}？</h2><p>将 {items.length} 个文件移到 Windows 回收站。</p></div><button disabled={busy} onClick={onClose} aria-label="关闭"><X size={18} /></button></div>
+        <ul className="delete-file-list">{items.map((item) => <li key={item.id}><strong title={item.name}>{item.name}</strong><span title={item.fullPath}>{item.fullPath}</span></li>)}</ul>
+        <div id="delete-note" className="delete-note">{items.some((item) => item.sourceRoot) ? "链接项目中的原文件也会移到回收站。" : "原文件会移到回收站。"}需要时可从 Windows 回收站恢复。</div>
+        {error && <p className="delete-error" role="alert">{error}</p>}
+        <div className="dialog-actions"><button ref={cancelRef} disabled={busy} onClick={onClose}>取消</button><button className="confirm-delete" disabled={busy} onClick={onConfirm}><Trash size={16} />{busy ? "正在删除…" : error ? "重试删除" : "移到回收站"}</button></div>
+      </section>
+    </div>
   );
 }
 
@@ -413,7 +458,10 @@ export function App() {
   const [renameError, setRenameError] = useState("");
   const [renameCategoryRaw, setRenameCategoryRaw] = useState("");
   const [renameCategoryValue, setRenameCategoryValue] = useState("");
-  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deleteItems, setDeleteItems] = useState([]);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const deleteBusyRef = useRef(false);
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
@@ -484,8 +532,8 @@ export function App() {
   const organizeSourceRoot = (selectedItems[0] || selected)?.sourceRoot;
   const canOrganizeSelection = DESKTOP && selectedItems.length > 0
     && selectedItems.every((item) => item.fullPath && (item.sourceRoot || "") === (organizeSourceRoot || ""));
-  const canDeleteSelection = rootKind === "library" && selectedItems.length > 0
-    && selectedItems.every((item) => item.fullPath && !item.sourceRoot);
+  const canDeleteItem = (item) => DESKTOP && Boolean(item.fullPath && (item.sourceRoot || rootPath));
+  const canDeleteSelection = selectedItems.length > 0 && selectedItems.every(canDeleteItem);
   const organizeCategoryOptions = useMemo(() => [...new Set(files
     .filter((item) => item.area === organizeArea && item.category && item.category !== "未分类")
     .map((item) => item.category))].sort((a, b) => a.localeCompare(b, "zh-CN")), [files, organizeArea]);
@@ -1081,32 +1129,63 @@ export function App() {
     }
   }
 
-  function openDeleteConfirm() {
-    if (!canDeleteSelection) {
-      setToast("只能删除素材库中的文件；链接项目请在原文件夹中处理");
+  function openDeleteConfirm(items = selectedItems) {
+    if (deleteBusyRef.current || !items.length || !items.every(canDeleteItem)) {
       return;
     }
-    setDeleteConfirmOpen(true);
+    setDeleteError("");
+    // Capture the confirmed files and their roots so watcher updates cannot change the targets.
+    setDeleteItems(items.map((item) => ({ ...item, deleteRoot: item.sourceRoot || rootPath })));
+  }
+
+  function requestItemDelete(item, includeSelection = false) {
+    openDeleteConfirm(includeSelection && selectedIds.has(item.id) ? selectedItems : [item]);
   }
 
   async function confirmDelete() {
-    if (!rootPath || !selectedItems.length) return;
+    if (deleteBusyRef.current || !deleteItems.length) return;
+    deleteBusyRef.current = true;
+    setDeleteBusy(true);
+    setDeleteError("");
     try {
-      const deleted = await window.yuDesktop.trashFiles(rootPath, selectedItems.map((item) => item.fullPath));
+      const groups = new Map();
+      for (const item of deleteItems) {
+        if (!groups.has(item.deleteRoot)) groups.set(item.deleteRoot, []);
+        groups.get(item.deleteRoot).push(item);
+      }
+      const deleted = [];
+      const failed = [];
+      for (const [deleteRoot, items] of groups) {
+        try {
+          const result = await window.yuDesktop.trashFiles(deleteRoot, items.map((item) => item.fullPath));
+          deleted.push(...result.deleted);
+          failed.push(...result.failed);
+        } catch (error) {
+          failed.push(...items.map((item) => ({ path: item.fullPath, message: error?.message || "删除失败" })));
+        }
+      }
       const deletedIds = new Set(deleted);
+      setFiles((current) => current.filter((item) => !deletedIds.has(item.id)));
       setFavorites((current) => new Set([...current].filter((id) => !deletedIds.has(id))));
       setNotes((current) => {
         const next = { ...current };
         deleted.forEach((id) => delete next[id]);
         return next;
       });
-      setDeleteConfirmOpen(false);
-      setSelectedIds(new Set());
-      setSelected(null);
-      await loadNativeDirectory(rootPath, true, linkedProjects);
-      setToast(`已将 ${deleted.length} 个文件移到回收站`);
+      setSelectedIds((current) => new Set([...current].filter((id) => !deletedIds.has(id))));
+      setSelected((current) => deletedIds.has(current?.id) ? null : current);
+      setSelectionAnchorId((current) => deletedIds.has(current) ? "" : current);
+      const failedPaths = new Set(failed.map((item) => item.path));
+      setDeleteItems((current) => current.filter((item) => failedPaths.has(item.fullPath)));
+      if (failed.length) {
+        setDeleteError(`${deleted.length ? `已删除 ${deleted.length} 个文件，` : ""}${failed.length} 个文件未能删除：${failed[0].message}。处理后可重试。`);
+      }
+      if (deleted.length) setToast(`已将 ${deleted.length} 个文件移到回收站`);
     } catch (error) {
-      setToast(error?.message || "删除文件失败");
+      setDeleteError(error?.message || "删除文件失败，请重试");
+    } finally {
+      deleteBusyRef.current = false;
+      setDeleteBusy(false);
     }
   }
 
@@ -1236,7 +1315,7 @@ export function App() {
               <button onClick={() => setSelectedIds(new Set(visibleItems.map((item) => item.id)))}>全选当前结果</button>
               <button onClick={() => { setSelectedIds(new Set()); setSelected(null); }}>取消选择</button>
               {canOrganizeSelection && <button className="batch-organize" onClick={openOrganizer}>移动 / 分类…</button>}
-              {canDeleteSelection && <button className="batch-delete" onClick={openDeleteConfirm}><Trash size={15} />移到回收站</button>}
+              {canDeleteSelection && <button className="batch-delete" onClick={() => openDeleteConfirm()}><Trash size={15} />删除所选</button>}
             </div>
           )}
 
@@ -1255,7 +1334,7 @@ export function App() {
             </div>
           ) : visibleItems.length ? (
             <div key={JSON.stringify([activeArea, project, mode, category, view])} className={`asset-grid ${view === "list" ? "list-view" : ""}`}>
-              {visibleItems.map((item) => <AssetCard key={item.id} item={item} selected={selectedIds.has(item.id)} favorite={favorites.has(item.id)} view={view} onSelect={selectAsset} onToggleSelection={toggleAssetSelection} onFavorite={toggleFavorite} onOpen={previewSelected} onRename={openFileRename} onDragFile={startFileDrag} />)}
+              {visibleItems.map((item) => <AssetCard key={item.id} item={item} selected={selectedIds.has(item.id)} favorite={favorites.has(item.id)} view={view} onSelect={selectAsset} onToggleSelection={toggleAssetSelection} onFavorite={toggleFavorite} onOpen={previewSelected} onRename={openFileRename} onDelete={requestItemDelete} canDelete={canDeleteItem(item)} onDragFile={startFileDrag} />)}
             </div>
           ) : (
             <div className="empty-state compact">
@@ -1291,7 +1370,7 @@ export function App() {
                   <button className="open-file-button" onClick={() => previewSelected(selected)}>打开文件</button>
                   <button onClick={() => revealSelected(selected)}>所在文件夹</button>
                   {canOrganizeSelection && <button className="organize-button" onClick={openOrganizer}>{selected.area === "待整理" ? "整理到…" : "移动 / 分类…"}</button>}
-                  {canDeleteSelection && selectedItems.length === 1 && <button className="delete-button" onClick={openDeleteConfirm}><Trash size={16} />移到回收站</button>}
+                  {canDeleteItem(selected) && <button className="delete-button" onClick={() => requestItemDelete(selected)}><Trash size={16} />删除文件</button>}
                 </div>
               )}
               <div className="tags-section">
@@ -1347,15 +1426,7 @@ export function App() {
           </section>
         </div>
       )}
-      {deleteConfirmOpen && (
-        <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setDeleteConfirmOpen(false); }}>
-          <section className="organize-dialog delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-title">
-            <div className="dialog-heading"><div><h2 id="delete-title">移到回收站？</h2><p>{selectedItems.length > 1 ? `将 ${selectedItems.length} 个已选文件移到 Windows 回收站。` : selectedItems[0]?.name}</p></div><button onClick={() => setDeleteConfirmOpen(false)} aria-label="关闭"><X size={18} /></button></div>
-            <div className="delete-note">文件不会被永久删除，需要时可以从回收站恢复。</div>
-            <div className="dialog-actions"><button onClick={() => setDeleteConfirmOpen(false)}>取消</button><button className="confirm-delete" onClick={confirmDelete}><Trash size={16} />移到回收站</button></div>
-          </section>
-        </div>
-      )}
+      {deleteItems.length > 0 && <DeleteDialog items={deleteItems} busy={deleteBusy} error={deleteError} onClose={() => { if (!deleteBusyRef.current) setDeleteItems([]); }} onConfirm={confirmDelete} />}
       {toast && <div className="toast" role="status"><CheckCircle size={18} weight="fill" />{toast}</div>}
     </div>
   );

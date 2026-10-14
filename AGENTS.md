@@ -35,3 +35,5 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 
 - Desktop material cards and inspector use persistent, versioned local thumbnails with bounded generation concurrency; opening a file retains the original. File overwrites invalidate thumbnails.
 - Desktop thumbnails must drag the original local file into Photoshop and other apps' file upload targets. A preview image must never become the drag payload; keep thumbnail display and native file dragging separate.
+
+- Material deletion is available on cards, in the inspector, and in the batch toolbar for both managed files and direct/linked projects. Confirm the exact original file names and paths, then use the Windows recycle bin. Keep failed batch items available for retry and update only deleted paths without a full rescan or changing the browsing context.
