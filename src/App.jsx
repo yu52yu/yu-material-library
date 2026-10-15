@@ -1,7 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  PROJECT_LINKS_STORAGE_KEY, normalizeProjectLinks, saveLinkGroup, removeLinkGroup,
+  removeLinkMember, remapLinkedFiles, removeLinkedFiles, groupsForFile,
+} from "./project-links.js";
+import { ProjectLinkDialog, ProjectGroupList, ProjectLinksInspector } from "./ProjectLinks.jsx";
+import { FILE_SORT_STORAGE_KEY, normalizeFileSort, sortFiles } from "./file-sort.js";
+import {
   Archive,
   CaretDown,
+  Check,
   CheckCircle,
   DownloadSimple,
   DotsSixVertical,
@@ -13,16 +20,18 @@ import {
   GridFour,
   Image as ImageIcon,
   ListBullets,
+  LinkSimple,
   MagnifyingGlass,
   Minus,
   PencilSimple,
   Plus,
   SlidersHorizontal,
+  SortAscending,
+  SortDescending,
   Sparkle,
   Square,
   Star,
   Trash,
-  UploadSimple,
   X,
 } from "@phosphor-icons/react";
 
@@ -31,6 +40,82 @@ const DESKTOP = Boolean(window.yuDesktop);
 const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "avif"]);
 const SOURCE_EXTENSIONS = new Set(["psd", "psb", "blend", "obj", "fbx", "stp", "step", "ai", "cdr"]);
 const MAX_FILES = 1200;
+const FILE_SORT_FIELDS = [
+  ["name", "名称"], ["modified", "修改时间"], ["size", "大小"], ["type", "类型"],
+];
+
+function FileSortControl({ value, onChange, onOpen }) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+  const triggerRef = useRef(null);
+  const menuRef = useRef(null);
+  const SortIcon = value.direction === "asc" ? SortAscending : SortDescending;
+  const directionLabels = value.field === "modified" ? ["最早优先", "最新优先"]
+    : value.field === "size" ? ["从小到大", "从大到小"] : ["升序", "降序"];
+  const fieldLabel = FILE_SORT_FIELDS.find(([field]) => field === value.field)?.[1];
+  const close = (restoreFocus = false) => {
+    setOpen(false);
+    if (restoreFocus) triggerRef.current?.focus();
+  };
+  useEffect(() => {
+    if (!open) return undefined;
+    menuRef.current?.querySelector('[aria-checked="true"]')?.focus();
+    const outside = (event) => {
+      if (!wrapRef.current?.contains(event.target)) setOpen(false);
+    };
+    const escape = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
+    };
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [open]);
+  const show = () => { onOpen(); setOpen(true); };
+  const choose = (next) => { onChange(next); close(true); };
+  return <div className="sort-wrap" ref={wrapRef} onBlur={(event) => {
+    if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+  }}>
+    <button ref={triggerRef} className={`icon-button ${open ? "active" : ""}`}
+      aria-label="排列方式" aria-haspopup="menu" aria-expanded={open} aria-controls={open ? "file-sort-menu" : undefined}
+      title={`${fieldLabel} · ${directionLabels[value.direction === "asc" ? 0 : 1]}`}
+      onClick={() => open ? close() : show()}
+      onKeyDown={(event) => {
+        if (["ArrowDown", "ArrowUp"].includes(event.key)) { event.preventDefault(); show(); }
+      }}><SortIcon size={20} /></button>
+    {open && <div ref={menuRef} id="file-sort-menu" className="sort-menu" role="menu" aria-label="文件排列" onKeyDown={(event) => {
+      if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const options = [...menuRef.current.querySelectorAll('[role="menuitemradio"]')];
+      const current = options.indexOf(document.activeElement);
+      const next = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1
+        : (current + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
+      options[next]?.focus();
+    }}>
+      <div className="sort-menu-label">排列方式</div>
+      <div role="group" aria-label="排列字段">
+        {FILE_SORT_FIELDS.map(([field, label]) => <button key={field} role="menuitemradio" aria-checked={value.field === field}
+          className={value.field === field ? "selected" : ""} onClick={() => choose({ ...value, field })}>
+          <span>{label}</span>{value.field === field && <Check size={14} aria-hidden="true" />}
+        </button>)}
+      </div>
+      <div className="sort-menu-divider" role="separator" />
+      <div className="sort-menu-label">顺序</div>
+      <div role="group" aria-label="排列顺序">
+        {["asc", "desc"].map((direction, index) => <button key={direction} role="menuitemradio" aria-checked={value.direction === direction}
+          className={value.direction === direction ? "selected" : ""} onClick={() => choose({ ...value, direction })}>
+          <span>{directionLabels[index]}</span>{value.direction === direction && <Check size={14} aria-hidden="true" />}
+        </button>)}
+      </div>
+    </div>}
+  </div>;
+}
 
 function PanelDivider({ side, width, onResize }) {
   const drag = useRef(null);
@@ -152,6 +237,8 @@ function makeRecord(file, relativePath, fileHandle = null) {
     extension,
     type: extension ? extension.toUpperCase() : "FILE",
     size: formatBytes(file.size),
+    sizeBytes: file.size,
+    modifiedAt: file.lastModified,
     modified: new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(file.lastModified),
     tags: [...new Set([...relativePath.split("/").slice(0, -1).map(stripOrderPrefix), classification.category])].filter(Boolean).slice(-5),
     ...classification,
@@ -190,6 +277,8 @@ function recordsFromNative(entries) {
       extension: entry.extension,
       type: entry.extension ? entry.extension.toUpperCase() : "FILE",
       size: formatBytes(entry.size),
+      sizeBytes: entry.size,
+      modifiedAt: entry.modified,
       modified: new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(entry.modified),
       tags: [...new Set([...entry.relativePath.split("/").slice(0, -1).map(stripOrderPrefix), classification.category])].filter(Boolean).slice(-5),
       ...classification,
@@ -423,6 +512,10 @@ export function App() {
   const [category, setCategory] = useState("全部");
   const [query, setQuery] = useState("");
   const [view, setView] = useState("grid");
+  const [fileSort, setFileSort] = useState(() => {
+    try { return normalizeFileSort(JSON.parse(localStorage.getItem(FILE_SORT_STORAGE_KEY) || "null")); }
+    catch { return normalizeFileSort(null); }
+  });
   const [favorites, setFavorites] = useState(() => {
     try { return new Set(JSON.parse(localStorage.getItem("yu-favorites") || "[]")); }
     catch { return new Set(); }
@@ -439,6 +532,13 @@ export function App() {
     try { return JSON.parse(localStorage.getItem("yu-category-orders") || "{}"); }
     catch { return {}; }
   });
+  const [assetLinks, setAssetLinks] = useState(() => {
+    try { return normalizeProjectLinks(localStorage.getItem(PROJECT_LINKS_STORAGE_KEY)); }
+    catch { return normalizeProjectLinks(null); }
+  });
+  const assetLinksRef = useRef(assetLinks);
+  const [linkDialog, setLinkDialog] = useState(null);
+  const [pendingLinkedSelection, setPendingLinkedSelection] = useState("");
   const [draggingCategory, setDraggingCategory] = useState("");
   const [selected, setSelected] = useState(null);
   const [selectedIds, setSelectedIds] = useState(() => new Set());
@@ -496,12 +596,35 @@ export function App() {
     setPanelWidths((current) => ({ ...current, [side]: Math.max(minimum, Math.min(maximum, width)) }));
   }
 
-  const projects = useMemo(() => [...new Set(files.filter((item) => item.area === "项目素材").map((item) => item.project))].sort(), [files]);
+  const projectOptions = useMemo(() => {
+    const options = new Map();
+    const add = (name, source) => {
+      if (!name) return;
+      const id = JSON.stringify([source || rootPath || rootName || "local", name]);
+      options.set(id, { id, name });
+    };
+    files.filter((item) => item.area === "项目素材").forEach((item) => add(item.project, item.sourceRoot));
+    linkedProjects.forEach((item) => add(item.name, item.path));
+    if (rootKind === "project") add(rootName, rootPath);
+    assetLinks.groups.forEach((group) => options.set(group.projectId, { id: group.projectId, name: group.projectName }));
+    return [...options.values()].sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
+  }, [files, linkedProjects, rootPath, rootName, rootKind, assetLinks]);
+  const projects = useMemo(() => [...new Set(projectOptions.map((item) => item.name))], [projectOptions]);
+  const projectLinkGroups = useMemo(() => assetLinks.groups.filter((group) => group.projectName === project), [assetLinks, project]);
+  const projectLinkedIds = useMemo(() => new Set(projectLinkGroups.flatMap((group) => group.members.map((member) => member.id))), [projectLinkGroups]);
+  const selectedLinkGroups = useMemo(() => groupsForFile(assetLinks, selected?.id), [assetLinks, selected?.id]);
+  const visibleLinkGroups = useMemo(() => {
+    const text = query.trim().toLowerCase();
+    return projectLinkGroups.filter((group) => !text || `${group.name} ${group.projectName} ${group.members.map((member) => `${member.name} ${member.role}`).join(" ")}`.toLowerCase().includes(text));
+  }, [projectLinkGroups, query]);
 
   const scopedFiles = useMemo(() => files.filter((item) => {
+    if (activeArea === "项目素材" && mode === "关联素材") {
+      return projectLinkedIds.has(item.id);
+    }
     if (activeArea === "项目素材") return item.area === "项目素材" && item.project === project && item.mode === mode;
     return item.area === activeArea;
-  }), [files, activeArea, project, mode]);
+  }), [files, activeArea, project, mode, projectLinkedIds]);
 
   const categoryOrderKey = JSON.stringify([activeArea, activeArea === "项目素材" ? project : "", activeArea === "项目素材" ? mode : ""]);
   const categories = useMemo(() => {
@@ -521,12 +644,12 @@ export function App() {
 
   const visibleItems = useMemo(() => {
     const normalized = query.trim().toLowerCase();
-    return scopedFiles.filter((item) => {
+    return sortFiles(scopedFiles.filter((item) => {
       const categoryMatch = category === "全部" || item.category === category;
       const text = `${item.name} ${item.type} ${item.relativePath} ${item.tags.join(" ")}`.toLowerCase();
       return categoryMatch && (!normalized || text.includes(normalized));
-    });
-  }, [scopedFiles, category, query]);
+    }), fileSort);
+  }, [scopedFiles, category, query, fileSort]);
 
   const selectedItems = useMemo(() => files.filter((item) => selectedIds.has(item.id)), [files, selectedIds]);
   const organizeSourceRoot = (selectedItems[0] || selected)?.sourceRoot;
@@ -598,6 +721,10 @@ export function App() {
   useEffect(() => { localStorage.setItem("yu-category-labels", JSON.stringify(categoryLabels)); }, [categoryLabels]);
   useEffect(() => { localStorage.setItem("yu-category-orders", JSON.stringify(categoryOrders)); }, [categoryOrders]);
   useEffect(() => { localStorage.setItem("yu-linked-projects", JSON.stringify(linkedProjects)); }, [linkedProjects]);
+  useEffect(() => {
+    try { localStorage.setItem(FILE_SORT_STORAGE_KEY, JSON.stringify(fileSort)); }
+    catch { setToast("无法保存排列设置"); }
+  }, [fileSort]);
 
   useEffect(() => {
     const visibleIds = new Set(visibleItems.map((item) => item.id));
@@ -622,6 +749,77 @@ export function App() {
       setActiveArea("项目素材");
     }
   }, [projects, project]);
+
+  useEffect(() => {
+    if (!pendingLinkedSelection) return;
+    const item = visibleItems.find((entry) => entry.id === pendingLinkedSelection);
+    if (!item) return;
+    setSelected(item);
+    setSelectedIds(new Set([item.id]));
+    setSelectionAnchorId(item.id);
+    setPendingLinkedSelection("");
+  }, [pendingLinkedSelection, visibleItems]);
+
+  function updateAssetLinks(transform) {
+    const next = transform(assetLinksRef.current);
+    try { localStorage.setItem(PROJECT_LINKS_STORAGE_KEY, JSON.stringify(next)); }
+    catch { throw new Error("项目关联保存失败，请检查本机存储空间"); }
+    assetLinksRef.current = next;
+    setAssetLinks(next);
+    return next;
+  }
+
+  function openProjectAssociation(items = selectedItems, group = null) {
+    setLinkDialog({ items: items.filter(Boolean).map((item) => ({ ...item })), group });
+    setImportOpen(false);
+  }
+
+  function saveProjectAssociation(input) {
+    const name = input.projectName?.trim();
+    const existing = assetLinksRef.current.groups.find((group) => group.id === input.id);
+    const projectId = (existing?.projectName === name ? existing.projectId : null) || projectOptions.find((item) => item.name === name)?.id
+      || JSON.stringify([rootPath || rootName || "local", name]);
+    const next = updateAssetLinks((state) => {
+      let base = state;
+      if (existing) {
+        const included = new Set(input.members.map((member) => member.id));
+        for (const member of existing.members) if (!included.has(member.id)) base = removeLinkMember(base, existing.id, member.id);
+      }
+      return saveLinkGroup(base, { ...input, projectId, projectName: name });
+    });
+    const group = next.groups.find((entry) => entry.id === input.id) || next.groups.at(-1);
+    setLinkDialog(null);
+    setProject(name);
+    setActiveArea("项目素材");
+    setMode("关联素材");
+    setQuery("");
+    setCategory("全部");
+    const firstAvailable = group?.members.find((member) => files.some((file) => file.id === member.id));
+    if (firstAvailable) setPendingLinkedSelection(firstAvailable.id);
+    setToast("项目关联已保存");
+  }
+
+  function cancelProjectAssociation(groupId) {
+    try {
+      updateAssetLinks((state) => removeLinkGroup(state, groupId));
+      setLinkDialog(null);
+      setToast("已取消关联");
+    } catch (error) { setToast(error.message); }
+  }
+
+  function cancelMemberAssociation(groupId, fileId) {
+    try { updateAssetLinks((state) => removeLinkMember(state, groupId, fileId)); }
+    catch (error) { setToast(error.message); }
+  }
+
+  function focusLinkedFile(item, group) {
+    setActiveArea("项目素材");
+    setProject(group.projectName);
+    setMode("关联素材");
+    setQuery("");
+    setCategory("全部");
+    setPendingLinkedSelection(item.id);
+  }
 
   async function loadDirectory(handle) {
     setScanning(true);
@@ -1086,6 +1284,8 @@ export function App() {
       setSelectedIds((current) => { const values = new Set(current); if (values.delete(renameItem.id)) values.add(destination); return values; });
       setFavorites((current) => { const values = new Set(current); if (values.delete(renameItem.id)) values.add(destination); return values; });
       setNotes((current) => { const values = { ...current }; if (renameItem.id !== destination && Object.hasOwn(values, renameItem.id)) { values[destination] = values[renameItem.id]; delete values[renameItem.id]; } return values; });
+      try { updateAssetLinks((state) => remapLinkedFiles(state, [{ source: renameItem.id, destination, name }])); }
+      catch (error) { setToast(error.message); }
       setRenameItem(null);
       setToast(`已重命名为 ${name}`);
     } catch (error) { setRenameError(error?.message || "重命名失败"); }
@@ -1096,7 +1296,7 @@ export function App() {
     const itemsToMove = selectedItems.length ? selectedItems : selected ? [selected] : [];
     if (!canOrganizeSelection || !itemsToMove.length || !(organizeSourceRoot || rootPath)) return;
     if (organizeArea === "项目素材" && !organizeProject.trim()) {
-      setToast("请填写项目名称，例如“第三代”");
+      setToast("请输入项目名称");
       return;
     }
     try {
@@ -1117,6 +1317,8 @@ export function App() {
         moves.forEach(({ source, destination }) => { if (next[source]) { next[destination] = next[source]; delete next[source]; } });
         return next;
       });
+      try { updateAssetLinks((state) => remapLinkedFiles(state, moves)); }
+      catch (error) { setToast(error.message); }
       setOrganizerOpen(false);
       setSelectedIds(new Set());
       setSelected(null);
@@ -1165,6 +1367,10 @@ export function App() {
         }
       }
       const deletedIds = new Set(deleted);
+      if (deleted.length) {
+        try { updateAssetLinks((state) => removeLinkedFiles(state, deleted)); }
+        catch (error) { setToast(error.message); }
+      }
       setFiles((current) => current.filter((item) => !deletedIds.has(item.id)));
       setFavorites((current) => new Set([...current].filter((id) => !deletedIds.has(id))));
       setNotes((current) => {
@@ -1219,7 +1425,7 @@ export function App() {
           <button className="nav-group-label project-label project-import" onClick={chooseProjectFolder} title="点击选择，或把项目文件夹拖进窗口"><span>项目素材</span><Plus size={15} /></button>
           {projects.length ? projects.map((name) => (
             <NavButton key={name} active={activeArea === "项目素材" && project === name} icon={project === name ? FolderOpen : Folder} nested onClick={() => selectProject(name)}>{name}</NavButton>
-          )) : <div className="nav-empty">点击“项目素材”或拖入项目文件夹</div>}
+          )) : null}
         </nav>
         <div className="sidebar-footer">
           <button aria-label="切换素材库" title={rootPath || "切换素材库"} onClick={chooseDirectory}><FolderOpen size={21} /></button>
@@ -1232,19 +1438,19 @@ export function App() {
         <header className="topbar">
           <label className="searchbox">
             <MagnifyingGlass size={21} aria-hidden="true" />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索素材、项目或文件" aria-label="搜索素材、项目或文件" />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索素材" aria-label="搜索素材" />
             {query && <button className="clear-search" onClick={() => setQuery("")} aria-label="清除搜索"><X size={15} /></button>}
           </label>
           <div className="import-wrap">
-            <button className="import-button" onClick={() => setImportOpen((open) => !open)} aria-expanded={importOpen}>
-              <UploadSimple size={19} /><span>导入素材</span><CaretDown size={14} />
+            <button className="import-button" title="添加素材" onClick={() => setImportOpen((open) => !open)} aria-expanded={importOpen}>
+              <Plus size={16} /><span>添加</span><CaretDown size={12} />
             </button>
             {importOpen && (
               <div className="import-menu">
-                <button onClick={importFilesToCurrentArea}><File size={18} />{DESKTOP ? `添加文件到${activeImportArea()}` : "选择本地文件"}</button>
-                {DESKTOP && <button onClick={chooseProjectFolder}><Folder size={18} />添加项目文件夹</button>}
-                <button onClick={chooseDirectory}><FolderOpen size={18} />读取素材库文件夹</button>
-                <button onClick={createLibraryStructure}><Plus size={18} />创建基础目录结构</button>
+                <button onClick={importFilesToCurrentArea}><File size={17} />添加文件…</button>
+                {DESKTOP && <button onClick={chooseProjectFolder}><Folder size={17} />连接项目文件夹…</button>}
+                <button onClick={chooseDirectory}><FolderOpen size={17} />打开素材库…</button>
+                <button onClick={createLibraryStructure}><Plus size={17} />创建素材库…</button>
               </div>
             )}
           </div>
@@ -1260,28 +1466,29 @@ export function App() {
         <section className="content-column">
           <div className="content-heading">
             <div>
-              <div className="title-row"><h1>{title}</h1>{rootName && <span className="result-count">{visibleItems.length} 个素材 · {rootName}</span>}</div>
+              <div className="title-row"><h1>{title}</h1>{rootName && <span className="result-count" title={rootPath || rootName}>{visibleItems.length} 项</span>}</div>
               {activeArea === "项目素材" && project && (
                 <div className="mode-tabs" role="tablist" aria-label="项目素材类型">
-                  {["参考素材", "制作素材"].map((tab) => <button key={tab} className={mode === tab ? "active" : ""} onClick={() => setMode(tab)} role="tab" aria-selected={mode === tab}>{tab}</button>)}
+                  {["参考素材", "制作素材", "关联素材"].map((tab) => <button key={tab} className={mode === tab ? "active" : ""} onClick={() => setMode(tab)} role="tab" aria-selected={mode === tab}>{tab}</button>)}
                 </div>
               )}
             </div>
-            <div className="view-actions">
+            {!(activeArea === "项目素材" && mode === "关联素材") && <div className="view-actions">
               <div className="view-toggle">
                 <button className={view === "grid" ? "active" : ""} onClick={() => setView("grid")} aria-label="网格视图"><GridFour size={20} /></button>
                 <button className={view === "list" ? "active" : ""} onClick={() => setView("list")} aria-label="列表视图"><ListBullets size={20} /></button>
               </div>
+              <FileSortControl value={fileSort} onChange={setFileSort} onOpen={() => { setFilterOpen(false); setImportOpen(false); }} />
               <div className="filter-wrap">
                 <button className={`icon-button ${filterOpen ? "active" : ""}`} onClick={() => setFilterOpen((open) => !open)} aria-label="更多筛选"><Funnel size={20} /></button>
                 {filterOpen && (
                   <div className="filter-menu"><strong>文件类型</strong>{["全部", "PSD", "JPG", "PNG", "BLEND"].map((type) => <button key={type} onClick={() => { setQuery(type === "全部" ? "" : type); setFilterOpen(false); }}>{type}</button>)}</div>
                 )}
               </div>
-            </div>
+            </div>}
           </div>
 
-          {!!files.length && categories.length > 1 && (
+          {!!files.length && categories.length > 1 && !(activeArea === "项目素材" && mode === "关联素材") && (
             <div className="category-bar" aria-label="素材分类筛选">
               {categories.map((item) => item === "全部" ? (
                 <button key={item} className={category === item ? "active" : ""} onClick={() => setCategory(item)}>{item}</button>
@@ -1314,23 +1521,24 @@ export function App() {
               <strong>已选择 {selectedIds.size} 项</strong>
               <button onClick={() => setSelectedIds(new Set(visibleItems.map((item) => item.id)))}>全选当前结果</button>
               <button onClick={() => { setSelectedIds(new Set()); setSelected(null); }}>取消选择</button>
+              <button className="association-action" onClick={() => openProjectAssociation()}><LinkSimple size={15} />关联项目</button>
               {canOrganizeSelection && <button className="batch-organize" onClick={openOrganizer}>移动 / 分类…</button>}
               {canDeleteSelection && <button className="batch-delete" onClick={() => openDeleteConfirm()}><Trash size={15} />删除所选</button>}
             </div>
           )}
 
           {scanning ? (
-            <div className="empty-state"><div className="spinner" /><h2>正在读取素材</h2><p>只建立索引，不移动或修改原文件。</p></div>
+            <div className="empty-state"><div className="spinner" /><h2>正在读取…</h2></div>
+          ) : activeArea === "项目素材" && mode === "关联素材" ? (
+            <ProjectGroupList groups={visibleLinkGroups} files={files} onEdit={(group) => openProjectAssociation([], group)} onSelectFile={focusLinkedFile} onRemoveMember={cancelMemberAssociation} onCreate={() => openProjectAssociation()} />
           ) : (!files.length && !rootName) || permissionNeeded ? (
             <div className="empty-state library-empty">
               <div className="empty-crest"><FolderOpen size={42} weight="duotone" /></div>
-              <h2>{permissionNeeded ? "重新连接你的素材库" : "把电脑里的素材接进来"}</h2>
-              <p>{permissionNeeded ? `请重新授权读取“${rootName}”文件夹。` : "选择一个文件夹后，瑜の素材库会按现有目录自动归类并生成缩略图，不会移动或修改原文件。"}</p>
+              <h2>{permissionNeeded ? "素材库未连接" : "未连接素材库"}</h2>
               <div className="empty-actions">
-                <button className="primary-empty" onClick={permissionNeeded ? reconnectDirectory : chooseDirectory}><FolderOpen size={18} />{permissionNeeded ? "重新连接" : "选择素材库文件夹"}</button>
-                {!permissionNeeded && <button onClick={createLibraryStructure}>创建基础目录</button>}
+                <button className="primary-empty" onClick={permissionNeeded ? reconnectDirectory : chooseDirectory}><FolderOpen size={18} />{permissionNeeded ? "重新连接" : "打开文件夹"}</button>
+                {!permissionNeeded && <button onClick={createLibraryStructure}>创建素材库</button>}
               </div>
-              <span className="drop-hint">{DESKTOP ? "可直接拖入“第三代”这类项目文件夹，原文件不会被复制。" : "也可以把零散文件直接拖到这里，先进入“待整理”"}</span>
             </div>
           ) : visibleItems.length ? (
             <div key={JSON.stringify([activeArea, project, mode, category, view])} className={`asset-grid ${view === "list" ? "list-view" : ""}`}>
@@ -1339,13 +1547,12 @@ export function App() {
           ) : (
             <div className="empty-state compact">
               <ImageIcon size={42} weight="duotone" />
-              <h2>{query || category !== "全部" ? "没有找到匹配素材" : `${title}里还没有文件`}</h2>
-              <p>{query || category !== "全部" ? "换个关键词或查看全部分类。" : ["下载素材", "AI制作素材"].includes(activeArea) ? "把文件直接拖到这里；首次添加时选择一次通用素材的保存位置。" : "保持现在的目录逻辑，把对应文件放进文件夹后刷新即可。"}</p>
+              <h2>{query || category !== "全部" ? "没有匹配结果" : "暂无素材"}</h2>
               <button onClick={() => {
                 if (query || category !== "全部") { setQuery(""); setCategory("全部"); }
                 else if (["下载素材", "AI制作素材"].includes(activeArea)) importFilesToCurrentArea();
                 else refreshLibrary();
-              }}>{query || category !== "全部" ? "清除筛选" : ["下载素材", "AI制作素材"].includes(activeArea) ? `添加到${activeArea}` : "刷新文件夹"}</button>
+              }}>{query || category !== "全部" ? "清除筛选" : ["下载素材", "AI制作素材"].includes(activeArea) ? "添加文件" : "刷新"}</button>
             </div>
           )}
         </section>
@@ -1373,20 +1580,22 @@ export function App() {
                   {canDeleteItem(selected) && <button className="delete-button" onClick={() => requestItemDelete(selected)}><Trash size={16} />删除文件</button>}
                 </div>
               )}
+              <ProjectLinksInspector groups={selectedLinkGroups} files={files} onEdit={(group) => openProjectAssociation([], group)} onSelectFile={focusLinkedFile} onCreate={() => openProjectAssociation([selected])} />
               <div className="tags-section">
                 <span className="section-label">目录标签</span>
                 <div className="tag-list">{selected.tags.map((tag) => <span key={tag}>{tag === selected.category ? displayCategory(tag, selected.area, selected.project, selected.mode) : tag}</span>)}</div>
               </div>
-              <label className="note-editor">备注<textarea placeholder="写一点方便自己查找的备注…" value={notes[selected.id] || ""} onChange={(event) => setNotes((current) => ({ ...current, [selected.id]: event.target.value }))} /></label>
+              <label className="note-editor">备注<textarea placeholder="添加备注" value={notes[selected.id] || ""} onChange={(event) => setNotes((current) => ({ ...current, [selected.id]: event.target.value }))} /></label>
             </>
           ) : (
-            <div className="inspector-placeholder"><ImageIcon size={36} /><span>选择素材查看详情</span></div>
+            <div className="inspector-placeholder"><ImageIcon size={32} /><span>未选择素材</span></div>
           )}
         </aside>
       </main>
 
       <input ref={fileInputRef} className="hidden-input" type="file" multiple onChange={(event) => addFiles(event.target.files)} />
       <input ref={folderInputRef} className="hidden-input" type="file" multiple webkitdirectory="true" onChange={(event) => addFiles(event.target.files)} />
+      {linkDialog && <ProjectLinkDialog groups={assetLinks.groups} projects={projectOptions} files={files} items={linkDialog.items} group={linkDialog.group} initialProject={linkDialog.group?.projectName || (activeArea === "项目素材" ? project : linkDialog.items[0]?.project || "")} onSave={saveProjectAssociation} onDelete={cancelProjectAssociation} onClose={() => setLinkDialog(null)} />}
       {organizerOpen && (
         <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setOrganizerOpen(false); }}>
           <section className="organize-dialog" role="dialog" aria-modal="true" aria-labelledby="organize-title">
@@ -1394,15 +1603,14 @@ export function App() {
             <label>整理到<select disabled={Boolean(organizeSourceRoot)} value={organizeArea} onChange={(event) => setOrganizeArea(event.target.value)}><option>项目素材</option><option>下载素材</option><option>AI制作素材</option></select></label>
             {organizeArea === "项目素材" ? (
               <>
-                <label>项目名称<input disabled={Boolean(organizeSourceRoot)} value={organizeProject} onChange={(event) => setOrganizeProject(event.target.value)} placeholder="例如：第三代" list="project-names" /><datalist id="project-names">{projects.map((name) => <option value={name} key={name} />)}</datalist></label>
+                <label>项目名称<input disabled={Boolean(organizeSourceRoot)} value={organizeProject} onChange={(event) => setOrganizeProject(event.target.value)} placeholder="项目名称" list="project-names" /><datalist id="project-names">{projects.map((name) => <option value={name} key={name} />)}</datalist></label>
                 <div className="dialog-pair">
                   <label>素材用途<select value={organizeMode} onChange={(event) => { const nextMode = event.target.value; setOrganizeMode(nextMode); if (["源文件", "PS源文件"].includes(organizeCategory)) setOrganizeCategory(nextMode === "参考素材" ? "PS源文件" : "源文件"); }}><option>参考素材</option><option>制作素材</option></select></label>
                   <label>文件分类<input value={organizeCategory} onChange={(event) => setOrganizeCategory(event.target.value)} placeholder="输入新分类或选择已有分类" list="project-category-options" /><datalist id="project-category-options">{projectCategoryOptions.map((name) => <option value={name} label={displayCategory(name, "项目素材", organizeProject, organizeMode)} key={name} />)}</datalist></label>
                 </div>
                 <div className="category-suggestions">{projectCategoryOptions.map((name) => <button type="button" className={organizeCategory === name ? "active" : ""} onClick={() => setOrganizeCategory(name)} key={name}>{displayCategory(name, "项目素材", organizeProject, organizeMode)}</button>)}</div>
-                <p>输入自定义分类名称，点击“移动到这里”后自动创建分类文件夹。</p>
               </>
-            ) : <label>素材类型<input value={organizeCategory} onChange={(event) => setOrganizeCategory(event.target.value)} placeholder="例如：动物、室内" list="existing-material-categories" /><datalist id="existing-material-categories">{organizeCategoryOptions.map((name) => <option value={name} label={displayCategory(name, organizeArea)} key={name} />)}</datalist>{organizeCategoryOptions.length > 0 && <div className="category-suggestions">{organizeCategoryOptions.map((name) => <button type="button" className={organizeCategory === name ? "active" : ""} onClick={() => setOrganizeCategory(name)} key={name}>{displayCategory(name, organizeArea)}</button>)}</div>}</label>}
+            ) : <label>素材类型<input value={organizeCategory} onChange={(event) => setOrganizeCategory(event.target.value)} placeholder="分类名称" list="existing-material-categories" /><datalist id="existing-material-categories">{organizeCategoryOptions.map((name) => <option value={name} label={displayCategory(name, organizeArea)} key={name} />)}</datalist>{organizeCategoryOptions.length > 0 && <div className="category-suggestions">{organizeCategoryOptions.map((name) => <button type="button" className={organizeCategory === name ? "active" : ""} onClick={() => setOrganizeCategory(name)} key={name}>{displayCategory(name, organizeArea)}</button>)}</div>}</label>}
             <div className="dialog-actions"><button onClick={() => setOrganizerOpen(false)}>取消</button><button className="confirm-organize" onClick={confirmOrganize}>移动到这里</button></div>
           </section>
         </div>
@@ -1410,7 +1618,7 @@ export function App() {
       {renameItem && (
         <div className="dialog-backdrop">
           <form className="organize-dialog rename-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-file-title" onSubmit={confirmFileRename} onKeyDown={(event) => { if (event.key === "Escape" && !renameBusy) setRenameItem(null); }}>
-            <div className="dialog-heading"><div><h2 id="rename-file-title">重命名文件</h2><p>修改原文件名称，扩展名保持不变。</p></div><button type="button" disabled={renameBusy} onClick={() => setRenameItem(null)} aria-label="关闭"><X size={18} /></button></div>
+            <div className="dialog-heading"><h2 id="rename-file-title">重命名文件</h2><button type="button" disabled={renameBusy} onClick={() => setRenameItem(null)} aria-label="关闭"><X size={18} /></button></div>
             <label>文件名称<input autoFocus disabled={renameBusy} value={renameValue} onFocus={(event) => event.target.select()} onChange={(event) => setRenameValue(event.target.value)} /></label>
             {renameError && <p role="alert">{renameError}</p>}
             <div className="dialog-actions"><button type="button" disabled={renameBusy} onClick={() => setRenameItem(null)}>取消</button><button className="confirm-organize" disabled={renameBusy || !renameValue.trim()} type="submit">{renameBusy ? "正在保存…" : "保存名称"}</button></div>
@@ -1420,8 +1628,8 @@ export function App() {
       {renameCategoryRaw && (
         <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setRenameCategoryRaw(""); }}>
           <section className="organize-dialog rename-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-category-title">
-            <div className="dialog-heading"><div><h2 id="rename-category-title">重命名分类</h2><p>只修改素材库里的显示名称，不改动原文件夹。</p></div><button onClick={() => setRenameCategoryRaw("")} aria-label="关闭"><X size={18} /></button></div>
-            <label>分类名称<input autoFocus value={renameCategoryValue} onChange={(event) => setRenameCategoryValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") saveCategoryRename(); }} /></label>
+            <div className="dialog-heading"><h2 id="rename-category-title">分类名称</h2><button onClick={() => setRenameCategoryRaw("")} aria-label="关闭"><X size={18} /></button></div>
+            <label>显示名称<input autoFocus value={renameCategoryValue} onChange={(event) => setRenameCategoryValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") saveCategoryRename(); }} /></label>
             <div className="dialog-actions"><button onClick={restoreCategoryName}>恢复默认</button><button onClick={() => setRenameCategoryRaw("")}>取消</button><button className="confirm-organize" onClick={saveCategoryRename}>保存名称</button></div>
           </section>
         </div>

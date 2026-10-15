@@ -2,10 +2,12 @@
 
 Windows 本地设计素材管理工具。素材保存在你自己选择的文件夹中；本仓库只保存程序源码和界面资源，不同步本地素材图片。
 
+2026-10-15，用户已批准项目关联、文件排列、窗口状态保存及本轮 UI 调整，并授权正式发布与更新本机。当前正在准备 **v0.12.0**；已发布的下载版本仍为 v0.11.6，详情见 [开发日志](开发日志.md)。
+
 ## 在另一台电脑使用
 
 - 直接安装：登录 GitHub 后，在 [Releases](https://github.com/yu52yu/yu-material-library/releases) 下载 `YuMaterialLibrary-*-Setup.exe`。安装包自带运行环境，无需另装 Node.js 或 pnpm。
-- 版本说明：截至 2026-10-14，主分支源码与线上安装包均为 **v0.11.6**。在 [v0.11.6 下载页](https://github.com/yu52yu/yu-material-library/releases/tag/v0.11.6) 获取最新 Windows 安装包；源码更新仍需单独构建并发布安装包。
+- 版本说明：截至 2026-10-15，本轮目标为 **v0.12.0**，处于发布准备阶段；目前已发布的 Windows 安装包为 **v0.11.6**，可从 [v0.11.6 下载页](https://github.com/yu52yu/yu-material-library/releases/tag/v0.11.6) 获取。源码更新仍需单独构建并发布安装包。
 - 查看或修改源码：克隆仓库，安装 Node.js 和 pnpm，运行 `pnpm install`。使用 `pnpm run desktop` 启动桌面版，或运行 `pnpm run build:desktop` 生成 Windows 安装包。
 - 首次打开后，选择那台电脑自己的素材文件夹，或使用“创建基础目录”。每台电脑独立设置项目名、分类名和本机收藏备注，安装包不带入这台电脑的文件夹命名、路径或素材。
 

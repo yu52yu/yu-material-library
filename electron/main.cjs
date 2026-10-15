@@ -1,5 +1,6 @@
-const { app, BrowserWindow, dialog, ipcMain, nativeImage, net, protocol, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, nativeImage, net, protocol, screen, shell } = require("electron");
 const { createThumbnailCache } = require("./thumbnail-cache.cjs");
+const { restoreWindowState, trackWindowState } = require("./window-state.cjs");
 const fs = require("node:fs");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
@@ -29,11 +30,12 @@ function sendLibraryEvent(channel, payload) {
 }
 
 function createWindow() {
+  const windowStatePath = path.join(app.getPath("userData"), "window-state.json");
+  const windowState = restoreWindowState(windowStatePath, screen.getAllDisplays(), screen.getPrimaryDisplay().id);
   mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 940,
-    minWidth: 980,
-    minHeight: 680,
+    ...windowState.bounds,
+    minWidth: windowState.minWidth,
+    minHeight: windowState.minHeight,
     frame: false,
     show: false,
     backgroundColor: "#fbfcfa",
@@ -47,7 +49,11 @@ function createWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, "..", "dist", "client", "index.html"));
-  mainWindow.once("ready-to-show", () => mainWindow.show());
+  mainWindow.once("ready-to-show", () => {
+    if (windowState.maximized) mainWindow.maximize();
+    trackWindowState(mainWindow, { filePath: windowStatePath, initialState: windowState });
+    mainWindow.show();
+  });
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
 }
 
