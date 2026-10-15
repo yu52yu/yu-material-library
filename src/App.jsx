@@ -1438,7 +1438,7 @@ export function App() {
         <header className="topbar">
           <label className="searchbox">
             <MagnifyingGlass size={21} aria-hidden="true" />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索素材" aria-label="搜索素材" />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索素材、项目或文件" aria-label="搜索素材、项目或文件" />
             {query && <button className="clear-search" onClick={() => setQuery("")} aria-label="清除搜索"><X size={15} /></button>}
           </label>
           <div className="import-wrap">
@@ -1447,10 +1447,10 @@ export function App() {
             </button>
             {importOpen && (
               <div className="import-menu">
-                <button onClick={importFilesToCurrentArea}><File size={17} />添加文件…</button>
-                {DESKTOP && <button onClick={chooseProjectFolder}><Folder size={17} />连接项目文件夹…</button>}
-                <button onClick={chooseDirectory}><FolderOpen size={17} />打开素材库…</button>
-                <button onClick={createLibraryStructure}><Plus size={17} />创建素材库…</button>
+                <button onClick={importFilesToCurrentArea}><File size={18} />{DESKTOP ? `添加文件到${activeImportArea()}` : "选择本地文件"}</button>
+                {DESKTOP && <button onClick={chooseProjectFolder}><Folder size={18} />添加项目文件夹</button>}
+                <button onClick={chooseDirectory}><FolderOpen size={18} />读取素材库文件夹</button>
+                <button onClick={createLibraryStructure}><Plus size={18} />创建基础目录结构</button>
               </div>
             )}
           </div>
@@ -1466,7 +1466,7 @@ export function App() {
         <section className="content-column">
           <div className="content-heading">
             <div>
-              <div className="title-row"><h1>{title}</h1>{rootName && <span className="result-count" title={rootPath || rootName}>{visibleItems.length} 项</span>}</div>
+              <div className="title-row"><h1>{title}</h1>{rootName && <span className="result-count">{visibleItems.length} 个素材 · {rootName}</span>}</div>
               {activeArea === "项目素材" && project && (
                 <div className="mode-tabs" role="tablist" aria-label="项目素材类型">
                   {["参考素材", "制作素材", "关联素材"].map((tab) => <button key={tab} className={mode === tab ? "active" : ""} onClick={() => setMode(tab)} role="tab" aria-selected={mode === tab}>{tab}</button>)}
@@ -1528,16 +1528,16 @@ export function App() {
           )}
 
           {scanning ? (
-            <div className="empty-state"><div className="spinner" /><h2>正在读取…</h2></div>
+            <div className="empty-state"><div className="spinner" /><h2>正在读取素材</h2></div>
           ) : activeArea === "项目素材" && mode === "关联素材" ? (
             <ProjectGroupList groups={visibleLinkGroups} files={files} onEdit={(group) => openProjectAssociation([], group)} onSelectFile={focusLinkedFile} onRemoveMember={cancelMemberAssociation} onCreate={() => openProjectAssociation()} />
           ) : (!files.length && !rootName) || permissionNeeded ? (
             <div className="empty-state library-empty">
               <div className="empty-crest"><FolderOpen size={42} weight="duotone" /></div>
-              <h2>{permissionNeeded ? "素材库未连接" : "未连接素材库"}</h2>
+              <h2>{permissionNeeded ? "重新连接你的素材库" : "把电脑里的素材接进来"}</h2>
               <div className="empty-actions">
-                <button className="primary-empty" onClick={permissionNeeded ? reconnectDirectory : chooseDirectory}><FolderOpen size={18} />{permissionNeeded ? "重新连接" : "打开文件夹"}</button>
-                {!permissionNeeded && <button onClick={createLibraryStructure}>创建素材库</button>}
+                <button className="primary-empty" onClick={permissionNeeded ? reconnectDirectory : chooseDirectory}><FolderOpen size={18} />{permissionNeeded ? "重新连接" : "选择素材库文件夹"}</button>
+                {!permissionNeeded && <button onClick={createLibraryStructure}>创建基础目录</button>}
               </div>
             </div>
           ) : visibleItems.length ? (
@@ -1547,12 +1547,12 @@ export function App() {
           ) : (
             <div className="empty-state compact">
               <ImageIcon size={42} weight="duotone" />
-              <h2>{query || category !== "全部" ? "没有匹配结果" : "暂无素材"}</h2>
+              <h2>{query || category !== "全部" ? "没有找到匹配素材" : `${title}里还没有文件`}</h2>
               <button onClick={() => {
                 if (query || category !== "全部") { setQuery(""); setCategory("全部"); }
                 else if (["下载素材", "AI制作素材"].includes(activeArea)) importFilesToCurrentArea();
                 else refreshLibrary();
-              }}>{query || category !== "全部" ? "清除筛选" : ["下载素材", "AI制作素材"].includes(activeArea) ? "添加文件" : "刷新"}</button>
+              }}>{query || category !== "全部" ? "清除筛选" : ["下载素材", "AI制作素材"].includes(activeArea) ? `添加到${activeArea}` : "刷新文件夹"}</button>
             </div>
           )}
         </section>
@@ -1585,10 +1585,10 @@ export function App() {
                 <span className="section-label">目录标签</span>
                 <div className="tag-list">{selected.tags.map((tag) => <span key={tag}>{tag === selected.category ? displayCategory(tag, selected.area, selected.project, selected.mode) : tag}</span>)}</div>
               </div>
-              <label className="note-editor">备注<textarea placeholder="添加备注" value={notes[selected.id] || ""} onChange={(event) => setNotes((current) => ({ ...current, [selected.id]: event.target.value }))} /></label>
+              <label className="note-editor">备注<textarea placeholder="写一点方便自己查找的备注…" value={notes[selected.id] || ""} onChange={(event) => setNotes((current) => ({ ...current, [selected.id]: event.target.value }))} /></label>
             </>
           ) : (
-            <div className="inspector-placeholder"><ImageIcon size={32} /><span>未选择素材</span></div>
+            <div className="inspector-placeholder"><ImageIcon size={36} /><span>选择素材查看详情</span></div>
           )}
         </aside>
       </main>
@@ -1610,7 +1610,7 @@ export function App() {
                 </div>
                 <div className="category-suggestions">{projectCategoryOptions.map((name) => <button type="button" className={organizeCategory === name ? "active" : ""} onClick={() => setOrganizeCategory(name)} key={name}>{displayCategory(name, "项目素材", organizeProject, organizeMode)}</button>)}</div>
               </>
-            ) : <label>素材类型<input value={organizeCategory} onChange={(event) => setOrganizeCategory(event.target.value)} placeholder="分类名称" list="existing-material-categories" /><datalist id="existing-material-categories">{organizeCategoryOptions.map((name) => <option value={name} label={displayCategory(name, organizeArea)} key={name} />)}</datalist>{organizeCategoryOptions.length > 0 && <div className="category-suggestions">{organizeCategoryOptions.map((name) => <button type="button" className={organizeCategory === name ? "active" : ""} onClick={() => setOrganizeCategory(name)} key={name}>{displayCategory(name, organizeArea)}</button>)}</div>}</label>}
+            ) : <label>素材类型<input value={organizeCategory} onChange={(event) => setOrganizeCategory(event.target.value)} placeholder="例如：动物、室内" list="existing-material-categories" /><datalist id="existing-material-categories">{organizeCategoryOptions.map((name) => <option value={name} label={displayCategory(name, organizeArea)} key={name} />)}</datalist>{organizeCategoryOptions.length > 0 && <div className="category-suggestions">{organizeCategoryOptions.map((name) => <button type="button" className={organizeCategory === name ? "active" : ""} onClick={() => setOrganizeCategory(name)} key={name}>{displayCategory(name, organizeArea)}</button>)}</div>}</label>}
             <div className="dialog-actions"><button onClick={() => setOrganizerOpen(false)}>取消</button><button className="confirm-organize" onClick={confirmOrganize}>移动到这里</button></div>
           </section>
         </div>
@@ -1618,7 +1618,7 @@ export function App() {
       {renameItem && (
         <div className="dialog-backdrop">
           <form className="organize-dialog rename-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-file-title" onSubmit={confirmFileRename} onKeyDown={(event) => { if (event.key === "Escape" && !renameBusy) setRenameItem(null); }}>
-            <div className="dialog-heading"><h2 id="rename-file-title">重命名文件</h2><button type="button" disabled={renameBusy} onClick={() => setRenameItem(null)} aria-label="关闭"><X size={18} /></button></div>
+            <div className="dialog-heading"><div><h2 id="rename-file-title">重命名文件</h2></div><button type="button" disabled={renameBusy} onClick={() => setRenameItem(null)} aria-label="关闭"><X size={18} /></button></div>
             <label>文件名称<input autoFocus disabled={renameBusy} value={renameValue} onFocus={(event) => event.target.select()} onChange={(event) => setRenameValue(event.target.value)} /></label>
             {renameError && <p role="alert">{renameError}</p>}
             <div className="dialog-actions"><button type="button" disabled={renameBusy} onClick={() => setRenameItem(null)}>取消</button><button className="confirm-organize" disabled={renameBusy || !renameValue.trim()} type="submit">{renameBusy ? "正在保存…" : "保存名称"}</button></div>
@@ -1628,8 +1628,8 @@ export function App() {
       {renameCategoryRaw && (
         <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setRenameCategoryRaw(""); }}>
           <section className="organize-dialog rename-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-category-title">
-            <div className="dialog-heading"><h2 id="rename-category-title">分类名称</h2><button onClick={() => setRenameCategoryRaw("")} aria-label="关闭"><X size={18} /></button></div>
-            <label>显示名称<input autoFocus value={renameCategoryValue} onChange={(event) => setRenameCategoryValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") saveCategoryRename(); }} /></label>
+            <div className="dialog-heading"><div><h2 id="rename-category-title">重命名分类</h2></div><button onClick={() => setRenameCategoryRaw("")} aria-label="关闭"><X size={18} /></button></div>
+            <label>分类名称<input autoFocus value={renameCategoryValue} onChange={(event) => setRenameCategoryValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") saveCategoryRename(); }} /></label>
             <div className="dialog-actions"><button onClick={restoreCategoryName}>恢复默认</button><button onClick={() => setRenameCategoryRaw("")}>取消</button><button className="confirm-organize" onClick={saveCategoryRename}>保存名称</button></div>
           </section>
         </div>
