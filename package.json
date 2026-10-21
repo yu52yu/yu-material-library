@@ -55,5 +55,6 @@
       "createStartMenuShortcut": true,
       "shortcutName": "瑜の素材库"
     }
-  }
+  },
+  "license": "GPL-3.0-only"
 }
