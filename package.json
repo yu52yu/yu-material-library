@@ -1,6 +1,6 @@
 {
   "name": "yu-material-library",
-  "version": "0.12.1",
+  "version": "1.1.0",
   "description": "瑜的本地设计素材管理库",
   "author": "Yu",
   "packageManager": "pnpm@11.19.0",
@@ -13,7 +13,7 @@
     "desktop": "vite build && electron .",
     "build:desktop": "vite build && node scripts/build-desktop.mjs",
     "preview": "vite preview",
-    "test:desktop": "node --test electron/library.test.cjs electron/watch-library.test.cjs electron/thumbnail-cache.test.cjs electron/window-state.test.cjs tests/project-links.test.mjs tests/file-sort.test.mjs",
+    "test:desktop": "node --test electron/*.test.cjs tests/project-links.test.mjs tests/file-sort.test.mjs tests/file-drop.test.mjs tests/catalog-view.test.mjs tests/catalog-integration.test.mjs tests/material-areas.test.mjs",
     "test:sites": "node --test tests/sites-worker.test.mjs"
   },
   "dependencies": {},

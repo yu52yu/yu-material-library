@@ -5,6 +5,13 @@ import {
 } from "./project-links.js";
 import { ProjectLinkDialog, ProjectGroupList, ProjectLinksInspector } from "./ProjectLinks.jsx";
 import { FILE_SORT_STORAGE_KEY, normalizeFileSort, sortFiles } from "./file-sort.js";
+import { CATEGORY_DRAG_TYPE, isCategoryDrag, isFileDrag, fileDropEffect, snapshotFileDrop } from "./file-drop.js";
+import { currentDropTarget } from "./drop-target.js";
+import { CatalogCategories, CatalogAssetEditor, CatalogFilters, CatalogStorageDialog, MaterialAreaDialog } from "./CatalogControls.jsx";
+import { DEFAULT_MATERIAL_AREAS, materialAreasFromCatalog, isMaterialArea, reusablePath } from "./material-areas.js";
+import { matchesCatalogAsset, mediaTypeFor, categoryBreadcrumb } from "./catalog-view.js";
+import { catalogEntry, mergeCatalogRecords, legacyCatalogPayload, normalizedPath } from "./catalog-integration.js";
+import "./catalog-controls.css";
 import {
   Archive,
   CaretDown,
@@ -181,12 +188,14 @@ function inferCategory(extension, mode) {
   return "渲染图";
 }
 
-function classifyPath(relativePath) {
+function classifyPath(relativePath, materialAreas = DEFAULT_MATERIAL_AREAS) {
   const rawParts = relativePath.split("/").filter(Boolean);
   const fileName = rawParts.at(-1) || "";
   const folders = rawParts.slice(0, -1);
   const clean = folders.map(stripOrderPrefix);
   const extension = extensionOf(fileName);
+  const reusable = reusablePath(relativePath, materialAreas);
+  if (reusable) return { area: reusable.area, project: "", mode: "", category: reusable.category };
 
   const projectIndex = clean.findIndex((part) => part === "项目素材");
   const materialIndex = clean.findIndex((part) => part === "素材");
@@ -266,11 +275,13 @@ function decoratePreviews(records) {
   return records;
 }
 
-function recordsFromNative(entries) {
+function recordsFromNative(entries, materialAreas = DEFAULT_MATERIAL_AREAS) {
   const records = entries.map((entry) => {
-    const classification = classifyPath(entry.relativePath);
+    const classification = classifyPath(entry.relativePath, materialAreas);
     return {
       id: entry.fullPath,
+      fileKey: entry.fileKey || "",
+      rootPath: entry.rootPath || "",
       name: entry.name,
       fullPath: entry.fullPath,
       relativePath: entry.relativePath,
@@ -387,9 +398,9 @@ async function createFolderPath(root, parts) {
   for (const part of parts) current = await current.getDirectoryHandle(part, { create: true });
 }
 
-function NavButton({ active, icon: Icon, children, onClick, nested = false }) {
+function NavButton({ active, icon: Icon, children, onClick, nested = false, title }) {
   return (
-    <button className={`nav-item ${active ? "active" : ""} ${nested ? "nested" : ""}`} onClick={onClick}>
+    <button className={`nav-item ${active ? "active" : ""} ${nested ? "nested" : ""}`} onClick={onClick} title={title}>
       <Icon size={19} weight={active ? "fill" : "regular"} aria-hidden="true" />
       <span>{children}</span>
     </button>
@@ -417,7 +428,7 @@ function AssetCard({ item, selected, favorite, view, onSelect, onToggleSelection
       onClick={(event) => onSelect(item, event)}
       onDoubleClick={() => onOpen(item)}
       title={DESKTOP && item.fullPath ? "拖到其他应用以使用原始文件" : undefined}
-      draggable={DESKTOP && Boolean(item.fullPath)}
+      draggable={DESKTOP && item.online !== false && Boolean(item.fullPath)}
       onDragStart={(event) => onDragFile(item, event)}
       tabIndex={0}
       onKeyDown={(event) => {
@@ -442,10 +453,10 @@ function AssetCard({ item, selected, favorite, view, onSelect, onToggleSelection
       <div className="asset-copy">
         <div className="asset-name-row">
           <div className="asset-name" title={item.name}>{item.name}</div>
-          {DESKTOP && <button className="file-rename" title="重命名" aria-label={`重命名 ${item.name}`} onDoubleClick={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRename(item); }}><PencilSimple size={15} /></button>}
+          {DESKTOP && <button className="file-rename" title="重命名原文件" aria-label={`重命名原文件 ${item.originalName || item.name}`} onDoubleClick={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRename(item); }}><PencilSimple size={15} /></button>}
           {canDelete && <button className="file-delete" title="删除（移到回收站）" aria-label={`删除 ${item.name}`} onDoubleClick={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onDelete(item); }}><Trash size={15} /></button>}
         </div>
-        <div className="asset-type">{item.type} · {item.size}</div>
+        <div className="asset-type">{item.type} · {item.size}{item.online === false ? " · 未连接" : ""}</div>
       </div>
       <button
         className={`selected-mark ${selected ? "active" : ""}`}
@@ -496,7 +507,19 @@ function DeleteDialog({ items, busy, error, onClose, onConfirm }) {
 }
 
 export function App() {
-  const [files, setFiles] = useState([]);
+  const [physicalFiles, setFiles] = useState([]);
+  const [catalog, setCatalog] = useState(null);
+  const [addingMaterialArea, setAddingMaterialArea] = useState(false);
+  const catalogRef = useRef(null);
+  const catalogQueue = useRef(Promise.resolve());
+  const [virtualCategory, setVirtualCategory] = useState("all");
+  const [searchScope, setSearchScope] = useState("all");
+  const [mediaType, setMediaType] = useState("all");
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [selectedTags, setSelectedTags] = useState([]);
+  const [storageInfo, setStorageInfo] = useState(null);
+  const [storageBusy, setStorageBusy] = useState(false);
+  const [storageError, setStorageError] = useState("");
   const [rootName, setRootName] = useState("");
   const [rootHandle, setRootHandle] = useState(null);
   const [rootPath, setRootPath] = useState("");
@@ -567,6 +590,15 @@ export function App() {
   const folderInputRef = useRef(null);
   const dragDepthRef = useRef(0);
   const draggingOutRef = useRef(false);
+  const importingDropRef = useRef(false);
+  useEffect(() => {
+    if (!DESKTOP) return undefined;
+    return window.yuDesktop.onFileDragEnded(() => {
+      draggingOutRef.current = false;
+      dragDepthRef.current = 0;
+      setIsDraggingFiles(false);
+    });
+  }, []);
   const [panelWidths, setPanelWidths] = useState(() => {
     try {
       const saved = JSON.parse(localStorage.getItem("yu-panel-widths") || "{}");
@@ -596,6 +628,113 @@ export function App() {
     setPanelWidths((current) => ({ ...current, [side]: Math.max(minimum, Math.min(maximum, width)) }));
   }
 
+  const files = useMemo(() => mergeCatalogRecords(physicalFiles, catalog, formatBytes), [physicalFiles, catalog]);
+  const materialAreas = materialAreasFromCatalog(catalog);
+  const virtualArea = isMaterialArea(activeArea, materialAreas);
+  const globalSearch = searchScope === "all" && Boolean(query.trim() || favoritesOnly || selectedTags.length || mediaType !== "all");
+  const showAssociations = activeArea === "项目素材" && mode === "关联素材" && !globalSearch;
+  const allTags = useMemo(() => [...new Set((catalog?.assets || []).flatMap((asset) => asset.tags))].sort((a,b) => a.localeCompare(b,"zh-CN")), [catalog]);
+  const selectedCatalogAsset = catalog?.assets.find((asset) => asset.id === selected?.assetId);
+
+  function applyCatalog(next) {
+    if (!next?.assets) return;
+    const previous = catalogRef.current;
+    catalogRef.current = next;
+    setCatalog(next);
+    setFavorites(new Set(next.assets.filter((asset) => asset.favorite).map((asset) => asset.fullPath)));
+    setNotes(Object.fromEntries(next.assets.filter((asset) => asset.note).map((asset) => [asset.fullPath, asset.note])));
+    if (next.settings?.projectLinks) {
+      const links = normalizeProjectLinks(next.settings.projectLinks);
+      assetLinksRef.current = links;
+      setAssetLinks(links);
+    }
+    if (previous) {
+      const currentPaths = new Map(next.assets.map((asset) => [asset.id, asset.fullPath]));
+      const paths = new Map(previous.assets.map((asset) => [asset.fullPath, currentPaths.get(asset.id) || asset.fullPath]));
+      setSelectedIds((current) => new Set([...current].map((id) => paths.get(id) || id)));
+      setSelected((current) => current && paths.get(current.id) ? {...current,id:paths.get(current.id),fullPath:paths.get(current.id)} : current);
+      setSelectionAnchorId((current) => paths.get(current) || current);
+    }
+  }
+
+  function catalogAction(method, ...args) {
+    const task = catalogQueue.current.catch(() => {}).then(async () => {
+      const value = await window.yuDesktop[method](...args);
+      if (value === null) return null;
+      applyCatalog(value?.assets ? value : await window.yuDesktop.catalogSnapshot());
+      return value;
+    });
+    catalogQueue.current = task;
+    return task;
+  }
+
+  async function createMaterialArea(name) {
+    await catalogAction("catalogCreateMaterialArea", name);
+    changeArea(name);
+    setSelected(null); setSelectedIds(new Set());
+  }
+
+  async function updateCatalogAsset(item, patch) {
+    if (!item?.assetId) return;
+    try { await catalogAction("catalogUpdateAssets", [item.assetId], patch); }
+    catch (error) { setToast(error.message || "整理信息保存失败"); throw error; }
+  }
+
+  async function assignCatalogSelection(categoryIds, options = {mode:"add"}) {
+    const ids = selectedItems.map((item) => item.assetId).filter(Boolean);
+    if (!ids.length) throw new Error("请先选择素材");
+    await catalogAction("catalogAssignCategories", ids, categoryIds, options);
+    setToast(options.mode === "remove" ? "已移出分类，原文件保留" : "分类已保存，原文件位置不变");
+  }
+
+  async function linkReusable(kind) {
+    setImportOpen(false);
+    try {
+      const area = virtualArea ? activeArea : "下载素材";
+      const result = await catalogAction(kind === "folder" ? "catalogLinkFolder" : "catalogLinkFiles", area);
+      if (!result) return;
+      if (virtualArea && catalog?.categories.some((entry) => entry.id === virtualCategory && entry.area === area)) {
+        const before = new Set(catalog?.assets.map((asset) => asset.id));
+        const linkedIds = new Set(result.linkedAssetIds || []);
+        const added = result.assets.filter((asset) => asset.area === area && (linkedIds.size ? linkedIds.has(asset.id) : !before.has(asset.id)));
+        if (added.length) await catalogAction("catalogAssignCategories", added.map((asset) => asset.id), [virtualCategory], {mode:"add"});
+      }
+      setActiveArea(area); setFavoritesOnly(false); setQuery("");
+      setToast("已原位连接，未复制或移动原文件");
+    } catch (error) { setToast(error.message || "连接素材失败"); }
+  }
+
+  async function openStorage() {
+    try { setStorageError(""); setStorageInfo(await window.yuDesktop.catalogStorageInfo()); }
+    catch (error) { setToast(error.message); }
+  }
+
+  async function storageAction(method, ...args) {
+    if (method === "catalogRestore") { setSelected(null); setSelectedIds(new Set()); await new Promise((resolve) => window.setTimeout(resolve,0)); }
+    await catalogQueue.current.catch(() => {});
+    setStorageBusy(true); setStorageError("");
+    try {
+      const result = await window.yuDesktop[method](...args);
+      if (result !== null) {
+        applyCatalog(await window.yuDesktop.catalogSnapshot());
+        setStorageInfo(await window.yuDesktop.catalogStorageInfo());
+        if (method === "catalogRestore") {
+          const settings = catalogRef.current.settings || {};
+          setLinkedProjects(settings.linkedProjects || []);
+          setCategoryLabels(settings.categoryLabels || {}); setCategoryOrders(settings.categoryOrders || {});
+          setFiles([]); setRootPath(settings.rootPath || "");setRootKind("none");setRootName("");
+          if (settings.rootPath) localStorage.setItem("yu-library-root",settings.rootPath);else localStorage.removeItem("yu-library-root");
+          if (!settings.projectLinks) {const empty={version:1,groups:[]};assetLinksRef.current=empty;setAssetLinks(empty);}
+          if (settings.rootPath || settings.linkedProjects?.length) await loadNativeDirectory(settings.rootPath || "", true, settings.linkedProjects || []);
+          await catalogAction("catalogRefreshReferences");
+          setVirtualCategory("all");
+          if (!["待整理","项目素材",...materialAreasFromCatalog(catalogRef.current)].includes(activeArea)) changeArea("下载素材");
+        }
+      }
+    } catch (error) { setStorageError(error.message || "资料库操作失败"); }
+    finally { setStorageBusy(false); }
+  }
+
   const projectOptions = useMemo(() => {
     const options = new Map();
     const add = (name, source) => {
@@ -619,12 +758,13 @@ export function App() {
   }, [projectLinkGroups, query]);
 
   const scopedFiles = useMemo(() => files.filter((item) => {
+    if (globalSearch) return true;
     if (activeArea === "项目素材" && mode === "关联素材") {
       return projectLinkedIds.has(item.id);
     }
     if (activeArea === "项目素材") return item.area === "项目素材" && item.project === project && item.mode === mode;
     return item.area === activeArea;
-  }), [files, activeArea, project, mode, projectLinkedIds]);
+  }), [files, activeArea, project, mode, projectLinkedIds, globalSearch]);
 
   const categoryOrderKey = JSON.stringify([activeArea, activeArea === "项目素材" ? project : "", activeArea === "项目素材" ? mode : ""]);
   const categories = useMemo(() => {
@@ -642,20 +782,24 @@ export function App() {
     return ["全部", ...available];
   }, [scopedFiles, categoryOrders, categoryOrderKey]);
 
-  const visibleItems = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    return sortFiles(scopedFiles.filter((item) => {
-      const categoryMatch = category === "全部" || item.category === category;
-      const text = `${item.name} ${item.type} ${item.relativePath} ${item.tags.join(" ")}`.toLowerCase();
-      return categoryMatch && (!normalized || text.includes(normalized));
-    }), fileSort);
-  }, [scopedFiles, category, query, fileSort]);
+  const visibleItems = useMemo(() => sortFiles(scopedFiles.filter((item) => {
+    const categoryMatch = globalSearch || (catalog && virtualArea) || category === "全部" || item.category === category;
+    return categoryMatch && matchesCatalogAsset({...item,
+      note: notes[item.id] || item.note || "", favorite: favorites.has(item.id),
+      mediaType: item.mediaType || mediaTypeFor(item.extension),
+      displayName: item.name,
+      tags: [...new Set([...item.tags, displayCategory(item.category, item.area, item.project, item.mode)])],
+    }, {query, mediaType, favoritesOnly, tags:selectedTags,
+      categoryId: !globalSearch && virtualArea && catalog ? virtualCategory : "all",
+      categories:catalog?.categories || []});
+  }), fileSort), [scopedFiles,category,query,fileSort,notes,favorites,mediaType,favoritesOnly,selectedTags,virtualCategory,catalog,globalSearch,virtualArea,categoryLabels]);
 
   const selectedItems = useMemo(() => files.filter((item) => selectedIds.has(item.id)), [files, selectedIds]);
   const organizeSourceRoot = (selectedItems[0] || selected)?.sourceRoot;
+  const organizeRootPath = (selectedItems[0] || selected)?.rootPath || organizeSourceRoot || rootPath;
   const canOrganizeSelection = DESKTOP && selectedItems.length > 0
-    && selectedItems.every((item) => item.fullPath && (item.sourceRoot || "") === (organizeSourceRoot || ""));
-  const canDeleteItem = (item) => DESKTOP && Boolean(item.fullPath && (item.sourceRoot || rootPath));
+    && selectedItems.every((item) => item.fullPath && item.online !== false && ["项目素材","待整理"].includes(item.area) && (item.sourceRoot || "") === (organizeSourceRoot || "") && (item.rootPath || item.sourceRoot || rootPath) === organizeRootPath);
+  const canDeleteItem = (item) => DESKTOP && item.online !== false && Boolean(item.fullPath && (item.sourceRoot || item.rootPath || rootPath));
   const canDeleteSelection = selectedItems.length > 0 && selectedItems.every(canDeleteItem);
   const organizeCategoryOptions = useMemo(() => [...new Set(files
     .filter((item) => item.area === organizeArea && item.category && item.category !== "未分类")
@@ -667,35 +811,55 @@ export function App() {
 
   useEffect(() => {
     if (!DESKTOP) return;
-    const normalize = (value) => value.replaceAll("\\", "/").toLowerCase();
+    const normalize = normalizedPath;
+    const references = catalog?.settings?.referenceRoots || [];
     const roots = [
-      ...(rootPath ? [{ path: rootPath, managed: rootKind === "library" }] : []),
+      ...(rootPath ? [{path:rootPath, managed:rootKind === "library"}] : []),
       ...linkedProjects.filter((link) => normalize(link.path) !== normalize(rootPath)),
+      ...references,
     ];
     const unsubscribe = window.yuDesktop.onLibraryChanged((change) => {
       const root = roots.find((entry) => normalize(entry.path) === normalize(change.rootPath));
       if (!root) return;
-      const updates = root.managed ? recordsFromNative(change.files)
+      if (root.kind) {
+        catalogAction("catalogApplyReferenceChange",change).catch((error) => setToast(error.message));
+        return;
+      }
+      const updates = root.managed ? recordsFromNative(change.files, materialAreasFromCatalog(catalogRef.current))
         : recordsAsProject(change.files, root.name || change.rootPath.split(/[\\/]/).at(-1), change.rootPath);
       const replaced = normalize(change.replacedPath);
-      setFiles((current) => {
-        const kept = current.filter((item) => {
-          const location = normalize(item.fullPath || "");
-          return location !== replaced && !location.startsWith(`${replaced}/`);
-        });
-        return [...kept, ...updates];
-      });
+      setFiles((current) => [...current.filter((item) => {
+        const location = normalize(item.fullPath || "");
+        return location !== replaced && !location.startsWith(`${replaced}/`);
+      }), ...updates]);
+      catalogAction("catalogReconcile", updates.map((item) => catalogEntry(item,change.rootPath,materialAreasFromCatalog(catalogRef.current))),
+        {rootPath:change.rootPath,complete:false,replacedPath:change.replacedPath}).catch((error) => setToast(error.message));
     });
     const unsubscribeError = window.yuDesktop.onWatchError(setToast);
     if (roots.length) window.yuDesktop.retainWatchers(roots.map((entry) => entry.path)).catch(() => {});
     return () => { unsubscribe(); unsubscribeError(); };
-  }, [rootPath, rootKind, linkedProjects]);
+  }, [rootPath, rootKind, linkedProjects, JSON.stringify(catalog?.settings?.referenceRoots || [])]);
 
   useEffect(() => {
     if (DESKTOP) {
       document.documentElement.classList.add("desktop-app");
-      const savedPath = window.localStorage.getItem("yu-library-root");
-      if (savedPath || linkedProjects.length) loadNativeDirectory(savedPath, true, linkedProjects);
+      (async () => {
+        const initial = await window.yuDesktop.catalogMigrateLegacy(legacyCatalogPayload(localStorage));
+        applyCatalog(initial);
+        const settings = initial.settings || {};
+        setCategoryLabels(settings.categoryLabels || categoryLabels);
+        setCategoryOrders(settings.categoryOrders || categoryOrders);
+        const savedPath = Object.hasOwn(settings,"rootPath") ? settings.rootPath : localStorage.getItem("yu-library-root");
+        const links = settings.linkedProjects || linkedProjects;
+        setLinkedProjects(links);
+        if (savedPath || links.length) await loadNativeDirectory(savedPath, true, links);
+        await catalogAction("catalogRefreshReferences");
+        const indexed = catalogRef.current?.assets || [];
+        if (indexed.some((asset) => asset.area === "下载素材")) setActiveArea("下载素材");
+        else if (indexed.some((asset) => asset.area === "AI制作素材")) setActiveArea("AI制作素材");
+        else if (indexed.some((asset) => isMaterialArea(asset.area,materialAreasFromCatalog(catalogRef.current)))) setActiveArea(indexed.find((asset) => isMaterialArea(asset.area,materialAreasFromCatalog(catalogRef.current))).area);
+        else if (indexed.some((asset) => asset.area === "项目素材")) setActiveArea("项目素材");
+      })().catch((error) => setToast(`资料库读取失败：${error.message}`));
       return undefined;
     }
     let cancelled = false;
@@ -746,7 +910,7 @@ export function App() {
   useEffect(() => {
     if (!project && projects.length) {
       setProject(projects[0]);
-      setActiveArea("项目素材");
+      if (!catalog) setActiveArea("项目素材");
     }
   }, [projects, project]);
 
@@ -766,6 +930,7 @@ export function App() {
     catch { throw new Error("项目关联保存失败，请检查本机存储空间"); }
     assetLinksRef.current = next;
     setAssetLinks(next);
+    if (DESKTOP && catalogRef.current) catalogAction("catalogSetSetting", "projectLinks", next).catch((error) => setToast(`项目关联保存失败：${error.message}`));
     return next;
   }
 
@@ -845,52 +1010,56 @@ export function App() {
 
   async function loadNativeDirectory(nextRootPath, quiet = false, projectLinks = linkedProjects) {
     if (!nextRootPath && !projectLinks.length) return;
-    setScanning(true);
-    setPermissionNeeded(false);
+    setScanning(true); setPermissionNeeded(false);
+    const nextFiles = []; const errors = [];
+    let result = null; let rootIsLibrary = false;
     try {
-      const result = nextRootPath ? await window.yuDesktop.scanLibrary(nextRootPath) : null;
-      const rootIsLibrary = result ? result.isManagedLibrary || hasLibraryStructure(result.files) : false;
-      let nextFiles = result
-        ? rootIsLibrary
-          ? recordsFromNative(result.files)
-          : recordsAsProject(result.files, result.rootName, result.rootPath)
-        : [];
-
-      const normalizedRoot = result?.rootPath?.toLowerCase();
-      const validLinks = [];
-      for (const link of projectLinks) {
-        if (!link?.path || link.path.toLowerCase() === normalizedRoot) continue;
+      if (nextRootPath) {
         try {
-          const linkedResult = await window.yuDesktop.scanLibrary(link.path);
-          const linkedName = link.name || linkedResult.rootName;
-          nextFiles.push(...recordsAsProject(linkedResult.files, linkedName, linkedResult.rootPath));
-          validLinks.push({ name: linkedName, path: linkedResult.rootPath });
-        } catch {
-          // Keep the rest of the library usable when a linked drive is offline.
+          result = await window.yuDesktop.scanLibrary(nextRootPath);
+          rootIsLibrary = result.isManagedLibrary || hasLibraryStructure(result.files);
+          const records = rootIsLibrary ? recordsFromNative(result.files, materialAreasFromCatalog(catalogRef.current)) : recordsAsProject(result.files,result.rootName,result.rootPath);
+          nextFiles.push(...records);
+          await catalogAction("catalogReconcile",records.map((item) => catalogEntry(item,result.rootPath,materialAreasFromCatalog(catalogRef.current))),{rootPath:result.rootPath,complete:result.complete !== false});
+        } catch (error) {
+          errors.push(error.message);
+          await catalogAction("catalogReconcile",[],{rootPath:nextRootPath,complete:true});
         }
       }
-      nextFiles = [...new Map(nextFiles.map((item) => [item.fullPath.toLowerCase(), item])).values()];
-      setFiles(nextFiles);
-      setRootName(result?.rootName || (validLinks.length ? `${validLinks.length} 个项目` : ""));
-      setRootPath(result?.rootPath || "");
-      setRootKind(result ? (rootIsLibrary ? "library" : "project") : "none");
-      if (result) window.localStorage.setItem("yu-library-root", result.rootPath);
-      if (validLinks.length !== projectLinks.length) setLinkedProjects(validLinks);
-      if (!quiet) setToast(result?.truncated ? `已读取前 ${nextFiles.length} 个文件` : `已读取 ${nextFiles.length} 个本地文件`);
-      const firstProject = nextFiles.find((item) => item.area === "项目素材")?.project;
-      if (firstProject) { setProject(firstProject); setActiveArea("项目素材"); }
-      else if (nextFiles.some((item) => item.area === "下载素材")) setActiveArea("下载素材");
-      else if (nextFiles.some((item) => item.area === "AI制作素材")) setActiveArea("AI制作素材");
-      else setActiveArea("待整理");
-    } catch (error) {
-      setFiles([]);
-      setRootPath("");
-      setRootKind("none");
-      window.localStorage.removeItem("yu-library-root");
-      if (!quiet) setToast(error?.message || "读取文件夹失败");
-    } finally {
-      setScanning(false);
-    }
+      const keptLinks = [];
+      for (const link of projectLinks) {
+        if (!link?.path || normalizedPath(link.path) === normalizedPath(nextRootPath)) continue;
+        keptLinks.push(link);
+        try {
+          const linked = await window.yuDesktop.scanLibrary(link.path);
+          const records = recordsAsProject(linked.files,link.name || linked.rootName,linked.rootPath);
+          nextFiles.push(...records);
+          await catalogAction("catalogReconcile",records.map((item) => catalogEntry(item,linked.rootPath,materialAreasFromCatalog(catalogRef.current))),{rootPath:linked.rootPath,complete:linked.complete !== false});
+        } catch (error) {
+          errors.push(`${link.name || link.path}：未连接`);
+          await catalogAction("catalogReconcile",[],{rootPath:link.path,complete:true});
+        }
+      }
+      setFiles([...new Map(nextFiles.map((item) => [normalizedPath(item.fullPath),item])).values()]);
+      setRootName(result?.rootName || (nextRootPath ? nextRootPath.split(/[\\/]/).at(-1) : "独立资料库"));
+      setRootPath(result?.rootPath || nextRootPath || "");
+      setRootKind(result ? (rootIsLibrary ? "library" : "project") : nextRootPath ? rootKind : "none");
+      if (nextRootPath) localStorage.setItem("yu-library-root",result?.rootPath || nextRootPath);
+      setLinkedProjects(keptLinks);
+      await catalogAction("catalogSetSetting","rootPath",result?.rootPath || nextRootPath || "");
+      await catalogAction("catalogSetSetting","linkedProjects",keptLinks);
+      if (!quiet) {
+        setVirtualCategory("all"); setQuery(""); setFavoritesOnly(false);
+        const firstProject = nextFiles.find((item) => item.area === "项目素材")?.project;
+        if (nextFiles.some((item) => item.area === "下载素材")) setActiveArea("下载素材");
+        else if (firstProject) {setProject(firstProject);setActiveArea("项目素材");}
+        else if (nextFiles.some((item) => item.area === "AI制作素材")) setActiveArea("AI制作素材");
+        else setActiveArea("待整理");
+      }
+      if (errors.length) setToast(`${errors.length} 个来源暂未连接，整理记录已保留`);
+      else if (!quiet) setToast(`已读取 ${nextFiles.length} 个本地文件`);
+    } catch (error) { setToast(error.message || "读取素材库失败，已保留原连接"); }
+    finally { setScanning(false); }
   }
 
   async function addProjectFolder(folderPath) {
@@ -1013,7 +1182,7 @@ export function App() {
   }
 
   function activeImportArea() {
-    return ["下载素材", "AI制作素材"].includes(activeArea) ? activeArea : "待整理";
+    return virtualArea ? activeArea : "待整理";
   }
 
   async function importFilesToCurrentArea() {
@@ -1029,6 +1198,11 @@ export function App() {
       const imported = await window.yuDesktop.pickFilesToArea(prepared.libraryPath, targetArea, "未分类");
       if (!imported.length) return;
       await loadNativeDirectory(prepared.libraryPath, true, prepared.projectLinks);
+      if (catalog && isMaterialArea(targetArea, materialAreas) && !["all","uncategorized"].includes(virtualCategory)) {
+        const paths = new Set(imported.map(normalizedPath));
+        const ids = catalogRef.current.assets.filter((asset) => paths.has(normalizedPath(asset.fullPath))).map((asset) => asset.id);
+        if (ids.length) await catalogAction("catalogAssignCategories",ids,[virtualCategory],{mode:"add"});
+      }
       setActiveArea(targetArea);
       setCategory("全部");
       setToast(`已添加 ${imported.length} 个文件到${targetArea}${targetArea === "待整理" ? "" : " · 未分类"}`);
@@ -1060,6 +1234,7 @@ export function App() {
 
   function changeArea(area) {
     setActiveArea(area);
+    setVirtualCategory("all"); setFavoritesOnly(false); setQuery(""); setSelectedTags([]); setMediaType("all");
     setImportOpen(false);
     setFilterOpen(false);
   }
@@ -1111,11 +1286,15 @@ export function App() {
   }
 
   function selectProject(nextProject) {
+    setVirtualCategory("all");
+    setFavoritesOnly(false); setQuery(""); setSelectedTags([]); setMediaType("all");
     setProject(nextProject);
     setActiveArea("项目素材");
   }
 
   function toggleFavorite(id) {
+    const item = files.find((entry) => entry.id === id);
+    if (item?.assetId) { updateCatalogAsset(item,{favorite:!favorites.has(id)}).catch(() => {}); return; }
     setFavorites((current) => {
       const next = new Set(current);
       if (next.has(id)) next.delete(id); else next.add(id);
@@ -1151,13 +1330,14 @@ export function App() {
   }
 
   function startFileDrag(item, event, allowButton = false) {
-    if (!DESKTOP || !item?.fullPath || (!allowButton && event.target.closest("button"))) {
+    if (!DESKTOP || !item?.fullPath || item.online === false || (!allowButton && event.target.closest("button"))) {
       event.preventDefault();
       return;
     }
     const paths = selectedIds.has(item.id) && selectedIds.size > 1
-      ? files.filter((entry) => selectedIds.has(entry.id) && entry.fullPath).map((entry) => entry.fullPath)
+      ? files.filter((entry) => selectedIds.has(entry.id) && entry.fullPath && entry.online !== false).map((entry) => entry.fullPath)
       : [item.fullPath];
+    try { event.dataTransfer.setData("application/x-yu-catalog-assets", JSON.stringify(paths)); } catch { /* Native file data remains authoritative. */ }
     draggingOutRef.current = true;
     event.dataTransfer.effectAllowed = "copy";
     event.preventDefault();
@@ -1186,24 +1366,65 @@ export function App() {
     }
   }
 
-  function refreshLibrary() {
-    if (DESKTOP && (rootPath || linkedProjects.length)) loadNativeDirectory(rootPath, false, linkedProjects);
-    else if (rootHandle) loadDirectory(rootHandle);
+  async function refreshLibrary() {
+    if (DESKTOP) {
+      if (rootPath || linkedProjects.length) await loadNativeDirectory(rootPath,true,linkedProjects);
+      try { await catalogAction("catalogRefreshReferences"); } catch (error) {setToast(error.message);}
+    } else if (rootHandle) loadDirectory(rootHandle);
   }
 
-  async function handleDrop(event) {
+  async function dropIntoCategory(event, categoryId) {
+    event.preventDefault(); event.stopPropagation();
+    const payload = snapshotFileDrop(event.dataTransfer,window.yuDesktop.getPathForFile);
+    try {
+      let paths = [];
+      try { paths = JSON.parse(event.dataTransfer.getData("application/x-yu-catalog-assets") || "[]"); } catch { /* Use native paths. */ }
+      if (!paths.length) paths = (await window.yuDesktop.describeDrop(payload)).filter((item) => item.isFile).map((item) => item.path);
+      const known = paths.map((filePath) => catalogRef.current?.assets.find((asset) => normalizedPath(asset.fullPath) === normalizedPath(filePath)));
+      if (known.length && known.every(Boolean)) {
+        if (categoryId === "all" || categoryId === "uncategorized") {
+          if (categoryId === "uncategorized") await catalogAction("catalogAssignCategories",known.map((asset) => asset.id),[],{mode:"replace"});
+        } else await catalogAction("catalogAssignCategories",known.map((asset) => asset.id),[categoryId],{mode:"add"});
+        draggingOutRef.current = false; setIsDraggingFiles(false);
+        setToast("分类已更新，原文件位置不变");
+        return;
+      }
+      await handleDrop(event,categoryId,payload);
+    } catch (error) {setToast(error.message || "添加到分类失败");}
+  }
+
+  async function handleDrop(event, targetCategoryId = virtualCategory, providedPayload = null) {
     event.preventDefault();
     dragDepthRef.current = 0;
     setIsDraggingFiles(false);
-    if (draggingOutRef.current) return;
+    if (isCategoryDrag(event.dataTransfer) || draggingOutRef.current) return;
+    if (globalSearch && !providedPayload) {setToast("请先打开目标项目或素材分类，再拖入新文件");return;}
     if (DESKTOP) {
+      const payload = providedPayload || snapshotFileDrop(event.dataTransfer, window.yuDesktop.getPathForFile);
+      const target = currentDropTarget({ activeArea, project, mode, category: catalog && virtualArea ? "全部" : category, files, rootPath, rootKind, rootName, linkedProjects, materialAreas });
+      if (importingDropRef.current) {
+        setToast("正在添加文件，请完成后再拖入");
+        return;
+      }
+      importingDropRef.current = true;
       try {
-        const droppedPaths = Array.from(event.dataTransfer.files)
-          .map((file) => window.yuDesktop.getPathForFile(file))
-          .filter(Boolean);
-        const dropped = await window.yuDesktop.describePaths(droppedPaths);
+        const dropped = await window.yuDesktop.describeDrop(payload);
+        if (!dropped.length) {
+          setToast("未读取到本地文件，请确认下载已完成，或从下载文件夹拖入");
+          return;
+        }
         const folders = dropped.filter((item) => item.isDirectory);
-        const looseFiles = dropped.filter((item) => item.isFile).map((item) => item.path);
+        let looseFiles = dropped.filter((item) => item.isFile).map((item) => item.path);
+        if (catalog && virtualArea) {
+          const known = catalogRef.current.assets.filter((asset) => looseFiles.some((filePath) => normalizedPath(filePath) === normalizedPath(asset.fullPath)));
+          if (known.length) {
+            if (!["all","uncategorized"].includes(targetCategoryId)) await catalogAction("catalogAssignCategories",known.map((asset) => asset.id),[targetCategoryId],{mode:"add"});
+            else if (targetCategoryId === "uncategorized") await catalogAction("catalogAssignCategories",known.map((asset) => asset.id),[],{mode:"replace"});
+            const paths = new Set(known.map((asset) => normalizedPath(asset.fullPath)));
+            looseFiles = looseFiles.filter((filePath) => !paths.has(normalizedPath(filePath)));
+            if (!looseFiles.length && !folders.length) {setToast("分类已更新，原文件位置不变");return;}
+          }
+        }
         let activeLinks = linkedProjects;
         if (folders.length) {
           let nextLinks = linkedProjects;
@@ -1224,21 +1445,44 @@ export function App() {
           setToast(`已添加 ${folders.length} 个项目文件夹`);
         }
         if (looseFiles.length) {
-          const targetArea = activeImportArea();
-          const prepared = await prepareReusableLibrary();
-          if (!prepared) {
-            setToast("未选择通用素材保存位置，文件没有导入");
+          if (!target) {
+            setToast("请先打开项目的参考素材或制作素材分类，再拖入文件");
             return;
           }
-          activeLinks = [...new Map([...activeLinks, ...prepared.projectLinks].map((item) => [item.path.toLowerCase(), item])).values()];
-          const imported = await window.yuDesktop.importFilesToArea(prepared.libraryPath, looseFiles, targetArea, "未分类");
-          await loadNativeDirectory(prepared.libraryPath, true, activeLinks);
-          setActiveArea(targetArea);
-          setCategory("全部");
-          setToast(`已添加 ${imported.length} 个文件到${targetArea}${targetArea === "待整理" ? "" : " · 未分类"}`);
+          let importRoot = target.root;
+          let nextRoot = rootPath;
+          if (!importRoot) {
+            const prepared = await prepareReusableLibrary();
+            if (!prepared) {
+              setToast("未选择通用素材保存位置，文件没有导入");
+              return;
+            }
+            importRoot = nextRoot = prepared.libraryPath;
+            activeLinks = [...new Map([...activeLinks, ...prepared.projectLinks].map((item) => [item.path.toLowerCase(), item])).values()];
+          }
+          const result = await window.yuDesktop.moveDroppedFiles(importRoot, looseFiles, target.directory);
+          if (!result.moved.length) {
+            setToast(result.error || "没有移动文件：文件已在目标文件夹，或下载文件已移动");
+            return;
+          }
+          applyCatalog(await window.yuDesktop.catalogSnapshot());
+          await loadNativeDirectory(nextRoot, true, activeLinks);
+          setActiveArea(target.area);
+          if (target.project) { setProject(target.project); setMode(target.mode); }
+          setCategory(target.category);
+          if (virtualArea && catalog && !["all","uncategorized"].includes(targetCategoryId)) {
+            const destinations = new Set(result.moved.map((move) => normalizedPath(move.destination)));
+            const ids = catalogRef.current.assets.filter((asset) => destinations.has(normalizedPath(asset.fullPath))).map((asset) => asset.id);
+            if (ids.length) await catalogAction("catalogAssignCategories",ids,[targetCategoryId],{mode:"add"});
+          }
+          setQuery("");
+          setToast(result.error ? `已移动 ${result.moved.length} 个文件；其余文件未移动：${result.error}`
+            : `已移动 ${result.moved.length} 个文件到${target.label}`);
         }
       } catch (error) {
         setToast(error?.message || "拖入内容读取失败");
+      } finally {
+        importingDropRef.current = false;
       }
       return;
     }
@@ -1247,7 +1491,7 @@ export function App() {
 
   function openOrganizer() {
     const sourceItem = selectedItems[0] || selected;
-    if (["下载素材", "AI制作素材"].includes(sourceItem?.area)) {
+    if (isMaterialArea(sourceItem?.area, materialAreas)) {
       setOrganizeArea(sourceItem.area);
       setOrganizeCategory(sourceItem.category === "未分类" ? "" : sourceItem.category);
       setOrganizerOpen(true);
@@ -1263,8 +1507,9 @@ export function App() {
 
   function openFileRename(item) {
     setRenameItem(item);
-    const dot = item.name.lastIndexOf(".");
-    setRenameValue(dot > 0 ? item.name.slice(0, dot) : item.name);
+    const original = item.originalName || item.name;
+    const dot = original.lastIndexOf(".");
+    setRenameValue(dot > 0 ? original.slice(0, dot) : original);
     setRenameError("");
   }
 
@@ -1274,7 +1519,7 @@ export function App() {
     setRenameBusy(true);
     setRenameError("");
     try {
-      const destination = await window.yuDesktop.renameFile(renameItem.sourceRoot || rootPath, renameItem.fullPath, renameValue);
+      const destination = await window.yuDesktop.renameFile(renameItem.sourceRoot || renameItem.rootPath || rootPath, renameItem.fullPath, renameValue);
       const name = destination.split(/[\\/]/).at(-1);
       const next = { ...renameItem, id: destination, fullPath: destination, name,
         relativePath: renameItem.relativePath.split("/").slice(0, -1).concat(name).join("/"),
@@ -1286,6 +1531,7 @@ export function App() {
       setNotes((current) => { const values = { ...current }; if (renameItem.id !== destination && Object.hasOwn(values, renameItem.id)) { values[destination] = values[renameItem.id]; delete values[renameItem.id]; } return values; });
       try { updateAssetLinks((state) => remapLinkedFiles(state, [{ source: renameItem.id, destination, name }])); }
       catch (error) { setToast(error.message); }
+      applyCatalog(await window.yuDesktop.catalogSnapshot());
       setRenameItem(null);
       setToast(`已重命名为 ${name}`);
     } catch (error) { setRenameError(error?.message || "重命名失败"); }
@@ -1294,19 +1540,20 @@ export function App() {
 
   async function confirmOrganize() {
     const itemsToMove = selectedItems.length ? selectedItems : selected ? [selected] : [];
-    if (!canOrganizeSelection || !itemsToMove.length || !(organizeSourceRoot || rootPath)) return;
+    if (!canOrganizeSelection || !itemsToMove.length || !(organizeRootPath)) return;
     if (organizeArea === "项目素材" && !organizeProject.trim()) {
       setToast("请输入项目名称");
       return;
     }
     try {
-      const moves = await window.yuDesktop.organizeFiles(organizeSourceRoot || rootPath, itemsToMove.map((item) => item.fullPath), {
+      const result = await window.yuDesktop.organizeFiles(organizeRootPath, itemsToMove.map((item) => item.fullPath), {
         directProject: Boolean(organizeSourceRoot),
         area: organizeArea,
         project: organizeProject,
         mode: organizeMode,
         category: organizeCategory,
       });
+      const moves = result.moves || result;
       setFavorites((current) => {
         const next = new Set(current);
         moves.forEach(({ source, destination }) => { if (next.delete(source)) next.add(destination); });
@@ -1325,7 +1572,8 @@ export function App() {
       await loadNativeDirectory(rootPath, true, linkedProjects);
       if (organizeArea === "项目素材") { setProject(organizeProject.trim()); setMode(organizeMode); }
       setActiveArea(organizeArea);
-      setToast(`已整理 ${moves.length} 个文件到目标位置`);
+      applyCatalog(await window.yuDesktop.catalogSnapshot());
+      setToast(result.error ? `已整理 ${moves.length} 项；其余未完成：${result.error}` : `已整理 ${moves.length} 个文件到目标位置`);
     } catch (error) {
       setToast(error?.message || "整理文件失败");
     }
@@ -1337,7 +1585,7 @@ export function App() {
     }
     setDeleteError("");
     // Capture the confirmed files and their roots so watcher updates cannot change the targets.
-    setDeleteItems(items.map((item) => ({ ...item, deleteRoot: item.sourceRoot || rootPath })));
+    setDeleteItems(items.map((item) => ({ ...item, deleteRoot: item.sourceRoot || item.rootPath || rootPath })));
   }
 
   function requestItemDelete(item, includeSelection = false) {
@@ -1386,7 +1634,10 @@ export function App() {
       if (failed.length) {
         setDeleteError(`${deleted.length ? `已删除 ${deleted.length} 个文件，` : ""}${failed.length} 个文件未能删除：${failed[0].message}。处理后可重试。`);
       }
-      if (deleted.length) setToast(`已将 ${deleted.length} 个文件移到回收站`);
+      if (deleted.length) {
+        applyCatalog(await window.yuDesktop.catalogSnapshot());
+        setToast(`已将 ${deleted.length} 个文件移到回收站`);
+      }
     } catch (error) {
       setDeleteError(error?.message || "删除文件失败，请重试");
     } finally {
@@ -1395,19 +1646,23 @@ export function App() {
     }
   }
 
-  const title = activeArea === "项目素材" ? project || "项目素材" : activeArea;
+  const title = globalSearch ? favoritesOnly && !query ? "我的收藏" : "全库搜索" : activeArea === "项目素材" ? project || "项目素材" : activeArea;
 
   return (
     <div
       className={`app-shell ${isDraggingFiles ? "files-dragging" : ""}`}
       style={{ "--sidebar-width": `${leftWidth}px`, "--inspector-width": `${rightWidth}px` }}
-      onDragOver={(event) => event.preventDefault()}
+      onDragOver={(event) => {
+        if (!isFileDrag(event.dataTransfer) || draggingOutRef.current) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = fileDropEffect(event.dataTransfer, DESKTOP);
+      }}
       onDragEnd={() => { draggingOutRef.current = false; dragDepthRef.current = 0; setIsDraggingFiles(false); }}
       onDragEnter={(event) => {
-        if (draggingOutRef.current) return;
+        if (draggingOutRef.current || !isFileDrag(event.dataTransfer)) return;
         event.preventDefault();
         dragDepthRef.current += 1;
-        if (Array.from(event.dataTransfer.types).includes("Files")) setIsDraggingFiles(true);
+        setIsDraggingFiles(true);
       }}
       onDragLeave={() => {
         dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
@@ -1418,18 +1673,27 @@ export function App() {
       <aside className="sidebar">
         <div className="brand"><img src={`${ASSET}knight-silver-aurora.png`} alt="银色骑士盾徽，左眼红色极光" /><span>瑜の素材库</span></div>
         <nav className="navigation" aria-label="素材库导航">
-          <NavButton active={activeArea === "待整理"} icon={Archive} onClick={() => changeArea("待整理")}>待整理</NavButton>
-          <div className="nav-group-label"><span>素材</span><CaretDown size={15} /></div>
+          {catalog && <NavButton active={favoritesOnly && searchScope === "all"} icon={Star} onClick={() => {setFavoritesOnly(true);setSearchScope("all");setQuery("");setMediaType("all");setSelectedTags([]);}}>我的收藏</NavButton>}
+          <NavButton active={activeArea === "待整理" && !globalSearch} icon={Archive} onClick={() => changeArea("待整理")}>待整理</NavButton>
+          <div className="nav-group-label"><span>素材</span><div className="material-area-actions">{catalog && <button type="button" className="project-import material-area-add" title="新增素材区" aria-label="新增素材区" onClick={() => setAddingMaterialArea(true)}><Plus size={15} /></button>}<CaretDown size={15} /></div></div>
           <NavButton active={activeArea === "下载素材"} icon={DownloadSimple} nested onClick={() => changeArea("下载素材")}>下载素材</NavButton>
           <NavButton active={activeArea === "AI制作素材"} icon={Sparkle} nested onClick={() => changeArea("AI制作素材")}>AI制作素材</NavButton>
+          {materialAreas.slice(2).map((area) => <NavButton key={area} title={area} active={activeArea === area} icon={Folder} nested onClick={() => changeArea(area)}>{area}</NavButton>)}
+          {catalog && virtualArea && !globalSearch && <CatalogCategories area={activeArea} materialAreas={materialAreas} categories={catalog.categories} selectedId={virtualCategory}
+            onSelect={(id) => {setVirtualCategory(id);setSelectedIds(new Set());setSelected(null);}}
+            onCreate={(input) => catalogAction("catalogCreateCategory",input)}
+            onRename={(id,patch) => catalogAction("catalogUpdateCategory",id,patch)}
+            onDelete={async (id) => {await catalogAction("catalogDeleteCategory",id);setVirtualCategory("all");}}
+            selectionCount={selectedItems.length} onAssign={assignCatalogSelection} onDropFiles={dropIntoCategory} />}
           <button className="nav-group-label project-label project-import" onClick={chooseProjectFolder} title="点击选择，或把项目文件夹拖进窗口"><span>项目素材</span><Plus size={15} /></button>
           {projects.length ? projects.map((name) => (
             <NavButton key={name} active={activeArea === "项目素材" && project === name} icon={project === name ? FolderOpen : Folder} nested onClick={() => selectProject(name)}>{name}</NavButton>
           )) : null}
         </nav>
         <div className="sidebar-footer">
+          {catalog && <button aria-label="资料库与缓存" title="资料库与缓存" onClick={openStorage}><GearSix size={21} /></button>}
           <button aria-label="切换素材库" title={rootPath || "切换素材库"} onClick={chooseDirectory}><FolderOpen size={21} /></button>
-          <button aria-label="刷新素材库" title="刷新素材库" disabled={scanning || (!rootPath && !rootHandle)} onClick={refreshLibrary}><SlidersHorizontal size={21} /></button>
+          <button aria-label="刷新素材库" title="刷新素材库" disabled={scanning || (!rootPath && !rootHandle && !catalog?.assets.length)} onClick={refreshLibrary}><SlidersHorizontal size={21} /></button>
         </div>
       </aside>
 
@@ -1447,7 +1711,9 @@ export function App() {
             </button>
             {importOpen && (
               <div className="import-menu">
-                <button onClick={importFilesToCurrentArea}><File size={18} />{DESKTOP ? `添加文件到${activeImportArea()}` : "选择本地文件"}</button>
+                {DESKTOP && <button onClick={() => linkReusable("files")}><LinkSimple size={18} />原位连接文件</button>}
+                {DESKTOP && <button onClick={() => linkReusable("folder")}><FolderOpen size={18} />原位连接素材文件夹</button>}
+                <button onClick={importFilesToCurrentArea}><File size={18} />{DESKTOP ? `复制文件到${activeImportArea()}` : "选择本地文件"}</button>
                 {DESKTOP && <button onClick={chooseProjectFolder}><Folder size={18} />添加项目文件夹</button>}
                 <button onClick={chooseDirectory}><FolderOpen size={18} />读取素材库文件夹</button>
                 <button onClick={createLibraryStructure}><Plus size={18} />创建基础目录结构</button>
@@ -1464,31 +1730,32 @@ export function App() {
         </header>
 
         <section className="content-column">
-          <div className="content-heading">
+          <div className={`content-heading${catalog ? " catalog-heading" : ""}`}>
             <div>
-              <div className="title-row"><h1>{title}</h1>{rootName && <span className="result-count">{visibleItems.length} 个素材 · {rootName}</span>}</div>
+              <div className="title-row"><h1 className={virtualArea && !DEFAULT_MATERIAL_AREAS.includes(activeArea) ? "material-area-title" : undefined} title={title}>{title}</h1>{rootName && <span className="result-count">{visibleItems.length} 个素材</span>}</div>
               {activeArea === "项目素材" && project && (
                 <div className="mode-tabs" role="tablist" aria-label="项目素材类型">
                   {["参考素材", "制作素材", "关联素材"].map((tab) => <button key={tab} className={mode === tab ? "active" : ""} onClick={() => setMode(tab)} role="tab" aria-selected={mode === tab}>{tab}</button>)}
                 </div>
               )}
             </div>
-            {!(activeArea === "项目素材" && mode === "关联素材") && <div className="view-actions">
+            {!showAssociations && <div className="view-actions">
               <div className="view-toggle">
                 <button className={view === "grid" ? "active" : ""} onClick={() => setView("grid")} aria-label="网格视图"><GridFour size={20} /></button>
                 <button className={view === "list" ? "active" : ""} onClick={() => setView("list")} aria-label="列表视图"><ListBullets size={20} /></button>
               </div>
               <FileSortControl value={fileSort} onChange={setFileSort} onOpen={() => { setFilterOpen(false); setImportOpen(false); }} />
-              <div className="filter-wrap">
+              {!catalog && <div className="filter-wrap">
                 <button className={`icon-button ${filterOpen ? "active" : ""}`} onClick={() => setFilterOpen((open) => !open)} aria-label="更多筛选"><Funnel size={20} /></button>
                 {filterOpen && (
                   <div className="filter-menu"><strong>文件类型</strong>{["全部", "PSD", "JPG", "PNG", "BLEND"].map((type) => <button key={type} onClick={() => { setQuery(type === "全部" ? "" : type); setFilterOpen(false); }}>{type}</button>)}</div>
                 )}
-              </div>
+              </div>}
             </div>}
+            {catalog && <CatalogFilters scope={searchScope} onScopeChange={setSearchScope} mediaType={mediaType} onMediaTypeChange={setMediaType}
+              favoritesOnly={favoritesOnly} onFavoritesChange={setFavoritesOnly} tags={allTags} selectedTags={selectedTags} onSelectedTagsChange={setSelectedTags} />}
           </div>
-
-          {!!files.length && categories.length > 1 && !(activeArea === "项目素材" && mode === "关联素材") && (
+          {!!files.length && !(catalog && virtualArea) && !globalSearch && categories.length > 1 && !showAssociations && (
             <div className="category-bar" aria-label="素材分类筛选">
               {categories.map((item) => item === "全部" ? (
                 <button key={item} className={category === item ? "active" : ""} onClick={() => setCategory(item)}>{item}</button>
@@ -1502,11 +1769,20 @@ export function App() {
                     event.stopPropagation();
                     setDraggingCategory(item);
                     event.dataTransfer.effectAllowed = "move";
+                    event.dataTransfer.setData(CATEGORY_DRAG_TYPE, item);
                     event.dataTransfer.setData("text/plain", item);
                   }}
                   onDragEnd={() => setDraggingCategory("")}
-                  onDragOver={(event) => { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = "move"; }}
-                  onDrop={(event) => { event.preventDefault(); event.stopPropagation(); reorderCategory(draggingCategory || event.dataTransfer.getData("text/plain"), item); }}
+                  onDragOver={(event) => {
+                    if (!isCategoryDrag(event.dataTransfer)) return;
+                    event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = "move";
+                  }}
+                  onDrop={(event) => {
+                    if (!isCategoryDrag(event.dataTransfer)) return;
+                    event.preventDefault(); event.stopPropagation();
+                    reorderCategory(draggingCategory || event.dataTransfer.getData(CATEGORY_DRAG_TYPE), item);
+                    setDraggingCategory("");
+                  }}
                 >
                   <span className="category-drag-handle" aria-hidden="true"><DotsSixVertical size={14} /></span>
                   <button className="category-filter" onClick={() => setCategory(item)}>{displayCategory(item)}</button>
@@ -1522,14 +1798,17 @@ export function App() {
               <button onClick={() => setSelectedIds(new Set(visibleItems.map((item) => item.id)))}>全选当前结果</button>
               <button onClick={() => { setSelectedIds(new Set()); setSelected(null); }}>取消选择</button>
               <button className="association-action" onClick={() => openProjectAssociation()}><LinkSimple size={15} />关联项目</button>
-              {canOrganizeSelection && <button className="batch-organize" onClick={openOrganizer}>移动 / 分类…</button>}
+              {canOrganizeSelection && !virtualArea && <button className="batch-organize" onClick={openOrganizer}>移动 / 分类…</button>}
+              {catalog && <select className="catalog-batch-destination" aria-label="批量加入分类" value="" onChange={(event) => {const id=event.target.value;if(id) assignCatalogSelection([id],{mode:"add"}).catch((error) => setToast(error.message));}}>
+                <option value="">加入分类…</option>{catalog.categories.filter((entry) => selectedItems.every((item) => item.area === entry.area)).map((entry) => <option key={entry.id} value={entry.id}>{entry.area} / {categoryBreadcrumb(catalog.categories,entry.id)}</option>)}
+              </select>}
               {canDeleteSelection && <button className="batch-delete" onClick={() => openDeleteConfirm()}><Trash size={15} />删除所选</button>}
             </div>
           )}
 
           {scanning ? (
             <div className="empty-state"><div className="spinner" /><h2>正在读取素材</h2></div>
-          ) : activeArea === "项目素材" && mode === "关联素材" ? (
+          ) : showAssociations ? (
             <ProjectGroupList groups={visibleLinkGroups} files={files} onEdit={(group) => openProjectAssociation([], group)} onSelectFile={focusLinkedFile} onRemoveMember={cancelMemberAssociation} onCreate={() => openProjectAssociation()} />
           ) : (!files.length && !rootName) || permissionNeeded ? (
             <div className="empty-state library-empty">
@@ -1538,6 +1817,7 @@ export function App() {
               <div className="empty-actions">
                 <button className="primary-empty" onClick={permissionNeeded ? reconnectDirectory : chooseDirectory}><FolderOpen size={18} />{permissionNeeded ? "重新连接" : "选择素材库文件夹"}</button>
                 {!permissionNeeded && <button onClick={createLibraryStructure}>创建基础目录</button>}
+                {catalog && <button onClick={() => linkReusable("folder")}>原位连接素材文件夹</button>}
               </div>
             </div>
           ) : visibleItems.length ? (
@@ -1550,9 +1830,9 @@ export function App() {
               <h2>{query || category !== "全部" ? "没有找到匹配素材" : `${title}里还没有文件`}</h2>
               <button onClick={() => {
                 if (query || category !== "全部") { setQuery(""); setCategory("全部"); }
-                else if (["下载素材", "AI制作素材"].includes(activeArea)) importFilesToCurrentArea();
+                else if (virtualArea) importFilesToCurrentArea();
                 else refreshLibrary();
-              }}>{query || category !== "全部" ? "清除筛选" : ["下载素材", "AI制作素材"].includes(activeArea) ? `添加到${activeArea}` : "刷新文件夹"}</button>
+              }}>{query || category !== "全部" ? "清除筛选" : virtualArea ? `添加到${activeArea}` : "刷新文件夹"}</button>
             </div>
           )}
         </section>
@@ -1573,19 +1853,23 @@ export function App() {
               </dl>
               {DESKTOP && (
                 <div className="inspector-actions">
-                  <button onClick={() => openFileRename(selected)}><PencilSimple size={16} />重命名</button>
+                  <button disabled={selected.online === false} onClick={() => openFileRename(selected)}><PencilSimple size={16} />重命名原文件</button>
                   <button className="open-file-button" onClick={() => previewSelected(selected)}>打开文件</button>
                   <button onClick={() => revealSelected(selected)}>所在文件夹</button>
-                  {canOrganizeSelection && <button className="organize-button" onClick={openOrganizer}>{selected.area === "待整理" ? "整理到…" : "移动 / 分类…"}</button>}
+                  {canOrganizeSelection && !virtualArea && <button className="organize-button" onClick={openOrganizer}>{selected.area === "待整理" ? "整理到…" : "移动 / 分类…"}</button>}
                   {canDeleteItem(selected) && <button className="delete-button" onClick={() => requestItemDelete(selected)}><Trash size={16} />删除文件</button>}
                 </div>
               )}
               <ProjectLinksInspector groups={selectedLinkGroups} files={files} onEdit={(group) => openProjectAssociation([], group)} onSelectFile={focusLinkedFile} onCreate={() => openProjectAssociation([selected])} />
-              <div className="tags-section">
+              {!selectedCatalogAsset && <div className="tags-section">
                 <span className="section-label">目录标签</span>
                 <div className="tag-list">{selected.tags.map((tag) => <span key={tag}>{tag === selected.category ? displayCategory(tag, selected.area, selected.project, selected.mode) : tag}</span>)}</div>
-              </div>
-              <label className="note-editor">备注<textarea placeholder="写一点方便自己查找的备注…" value={notes[selected.id] || ""} onChange={(event) => setNotes((current) => ({ ...current, [selected.id]: event.target.value }))} /></label>
+              </div>}
+              {selectedCatalogAsset && <CatalogAssetEditor asset={selectedCatalogAsset} materialAreas={materialAreas} categories={catalog.categories}
+                onUpdate={(patch) => updateCatalogAsset(selected,patch)}
+                onAssign={(ids,options) => catalogAction("catalogAssignCategories",[selected.assetId],ids,options)}
+                onRelink={() => catalogAction("catalogRelink",selected.assetId).catch((error) => setToast(error.message || "重新连接失败"))} />}
+              {!selectedCatalogAsset && <label className="note-editor">备注<textarea placeholder="写一点方便自己查找的备注…" value={notes[selected.id] || ""} onChange={(event) => setNotes((current) => ({ ...current, [selected.id]: event.target.value }))} /></label>}
             </>
           ) : (
             <div className="inspector-placeholder"><ImageIcon size={36} /><span>选择素材查看详情</span></div>
@@ -1593,6 +1877,11 @@ export function App() {
         </aside>
       </main>
 
+      {addingMaterialArea && <MaterialAreaDialog onClose={() => setAddingMaterialArea(false)} onCreate={createMaterialArea} />}
+      {storageInfo && <CatalogStorageDialog info={storageInfo} busy={storageBusy} error={storageError} onClose={() => setStorageInfo(null)}
+        onChoose={() => storageAction("catalogChooseStorage")}
+        onBackup={() => storageAction("catalogBackup")} onRestore={() => storageAction("catalogRestore")}
+        onClearCache={() => storageAction("catalogClearCache")} onLimitChange={(mb) => storageAction("catalogSetCacheLimit",mb)} />}
       <input ref={fileInputRef} className="hidden-input" type="file" multiple onChange={(event) => addFiles(event.target.files)} />
       <input ref={folderInputRef} className="hidden-input" type="file" multiple webkitdirectory="true" onChange={(event) => addFiles(event.target.files)} />
       {linkDialog && <ProjectLinkDialog groups={assetLinks.groups} projects={projectOptions} files={files} items={linkDialog.items} group={linkDialog.group} initialProject={linkDialog.group?.projectName || (activeArea === "项目素材" ? project : linkDialog.items[0]?.project || "")} onSave={saveProjectAssociation} onDelete={cancelProjectAssociation} onClose={() => setLinkDialog(null)} />}
@@ -1600,7 +1889,7 @@ export function App() {
         <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setOrganizerOpen(false); }}>
           <section className="organize-dialog" role="dialog" aria-modal="true" aria-labelledby="organize-title">
             <div className="dialog-heading"><div><h2 id="organize-title">整理文件</h2><p title={selectedItems.length > 1 ? "" : selected?.name}>{selectedItems.length > 1 ? `已选择 ${selectedItems.length} 个文件` : selected?.name}</p></div><button onClick={() => setOrganizerOpen(false)} aria-label="关闭"><X size={18} /></button></div>
-            <label>整理到<select disabled={Boolean(organizeSourceRoot)} value={organizeArea} onChange={(event) => setOrganizeArea(event.target.value)}><option>项目素材</option><option>下载素材</option><option>AI制作素材</option></select></label>
+            <label>整理到<select disabled={Boolean(organizeSourceRoot)} value={organizeArea} onChange={(event) => setOrganizeArea(event.target.value)}><option>项目素材</option>{materialAreas.map((area) => <option key={area}>{area}</option>)}</select></label>
             {organizeArea === "项目素材" ? (
               <>
                 <label>项目名称<input disabled={Boolean(organizeSourceRoot)} value={organizeProject} onChange={(event) => setOrganizeProject(event.target.value)} placeholder="项目名称" list="project-names" /><datalist id="project-names">{projects.map((name) => <option value={name} key={name} />)}</datalist></label>

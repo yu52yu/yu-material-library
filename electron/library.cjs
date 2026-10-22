@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { isMaterialArea } = require("./material-areas.cjs");
 
-const MAX_FILES = 12000;
 const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "avif"]);
 const LIBRARY_DIRECTORIES = [
   "00_待整理",
@@ -40,6 +40,25 @@ function previewUrlFor(filePath) {
   return `yu-asset://file/${encoded}`;
 }
 
+function descriptorForFile(fullPath, stat, rootPath = path.dirname(fullPath)) {
+  // Windows file IDs may exceed JavaScript's exact integer range. Preserve the
+  // native identity as text rather than rounding two different files together.
+  const exact = typeof stat.ino === 'bigint' ? stat : fs.statSync(fullPath, { bigint: true });
+  const relativePath = path.relative(rootPath, fullPath).split(path.sep).join("/");
+  const parts = relativePath.split("/");
+  let folders = parts.slice(0, -1);
+  if (folders[0] === "01_素材" && isMaterialArea(folders[1], [folders[1]])) folders = folders.slice(2);
+  const extension = extensionOf(fullPath);
+  return {
+    name: path.basename(fullPath), fullPath, relativePath, rootPath, sourceRoot: rootPath,
+    extension, size: Number(exact.size), modified: Number(exact.mtimeNs) / 1e6,
+    fileKey: `${exact.dev}:${exact.ino}:${exact.birthtimeNs}`,
+    birthtime: String(exact.birthtimeNs), categoryPath: folders,
+    previewUrl: IMAGE_EXTENSIONS.has(extension) ? previewUrlFor(fullPath) : null,
+    isImage: IMAGE_EXTENSIONS.has(extension),
+  };
+}
+
 async function assertDirectory(rootPath) {
   const resolved = path.resolve(rootPath);
   const stat = await fs.promises.stat(resolved);
@@ -56,27 +75,30 @@ async function ensureLibraryStructure(rootPath) {
   return resolved;
 }
 
-async function scanLibrary(rootPath) {
+async function scanLibrary(rootPath, { excludePaths = [] } = {}) {
   const root = await assertDirectory(rootPath);
   const files = [];
   const isManagedLibrary = LIBRARY_DIRECTORIES.every((relativePath) => fs.existsSync(path.join(root, relativePath)));
   const pending = isManagedLibrary
-    ? LIBRARY_DIRECTORIES.map((relativePath) => path.join(root, relativePath))
+    ? ["00_待整理", "01_素材", "02_项目素材"].map((relativePath) => path.join(root, relativePath))
     : [root];
 
-  while (pending.length && files.length < MAX_FILES) {
+  const scanErrors = [];
+  while (pending.length) {
     const directory = pending.pop();
+    if (excludePaths.some(excluded => isInside(excluded, directory))) continue;
     let entries;
     try {
       entries = await fs.promises.readdir(directory, { withFileTypes: true });
-    } catch {
+    } catch (error) {
+      scanErrors.push({ path: directory, message: error.message });
       continue;
     }
 
     entries.sort((a, b) => a.name.localeCompare(b.name, "zh-CN", { numeric: true }));
     for (const entry of entries) {
-      if (files.length >= MAX_FILES) break;
       const fullPath = path.join(directory, entry.name);
+      if (excludePaths.some(excluded => isInside(excluded, fullPath))) continue;
       if (entry.isDirectory()) {
         pending.push(fullPath);
         continue;
@@ -84,19 +106,11 @@ async function scanLibrary(rootPath) {
       if (!entry.isFile()) continue;
 
       try {
-        const stat = await fs.promises.stat(fullPath);
-        const extension = extensionOf(entry.name);
-        files.push({
-          name: entry.name,
-          fullPath,
-          relativePath: path.relative(root, fullPath).split(path.sep).join("/"),
-          extension,
-          size: stat.size,
-          modified: stat.mtimeMs,
-          previewUrl: IMAGE_EXTENSIONS.has(extension) ? previewUrlFor(fullPath) : null,
-          isImage: IMAGE_EXTENSIONS.has(extension),
-        });
-      } catch {
+        const stat = await fs.promises.stat(fullPath, { bigint: true });
+        files.push(descriptorForFile(fullPath, stat, root));
+        if (files.length % 200 === 0) await new Promise((resolve) => setImmediate(resolve));
+      } catch (error) {
+        if (error.code !== "ENOENT") scanErrors.push({ path: fullPath, message: error.message });
         // A file can disappear or become locked while a folder is being indexed.
       }
     }
@@ -108,7 +122,9 @@ async function scanLibrary(rootPath) {
     rootName: path.basename(root),
     files,
     isManagedLibrary,
-    truncated: files.length >= MAX_FILES,
+    truncated: false,
+    complete: scanErrors.length === 0,
+    scanErrors,
   };
 }
 
@@ -172,17 +188,18 @@ async function trashFiles(rootPath, filePaths, trashItem) {
   return { deleted, failed };
 }
 
-function targetDirectoryForArea(root, area, category) {
+function targetDirectoryForArea(root, area, category, customAreas = []) {
   if (area === "待整理") return path.join(root, "00_待整理");
-  if (area === "下载素材") return path.join(root, "01_素材", "下载素材", safeSegment(category, "未分类"));
-  if (area === "AI制作素材") return path.join(root, "01_素材", "AI制作素材", safeSegment(category, "未分类"));
+  if (isMaterialArea(area, customAreas)) return path.join(root, "01_素材", area, safeSegment(category, "未分类"));
   throw new Error("导入目标无效");
 }
 
-async function copyFilesToArea(rootPath, sourcePaths, area = "待整理", category = "未分类") {
+async function copyFilesToArea(rootPath, sourcePaths, area = "待整理", category = "未分类", customAreas = []) {
+  // Validate the registered area before creating directories. Renderer-provided
+  // names may never become arbitrary filesystem paths.
+  const relativeDirectory = path.relative(path.resolve(rootPath), targetDirectoryForArea(path.resolve(rootPath), area, category, customAreas));
   const root = await ensureLibraryStructure(rootPath);
-  const targetDirectory = targetDirectoryForArea(root, area, category);
-  await fs.promises.mkdir(targetDirectory, { recursive: true });
+  const { directory: targetDirectory } = await prepareImportDirectory(root, relativeDirectory);
   const imported = [];
 
   for (const sourcePath of sourcePaths) {
@@ -200,6 +217,71 @@ async function copyFilesToInbox(rootPath, sourcePaths) {
   return copyFilesToArea(rootPath, sourcePaths, "待整理");
 }
 
+async function prepareImportDirectory(rootPath, relativeDirectory) {
+  const root = await assertDirectory(rootPath);
+  if (typeof relativeDirectory !== "string" || relativeDirectory.includes("\0") || path.isAbsolute(relativeDirectory)) {
+    throw new Error("导入目标无效");
+  }
+  const directory = path.resolve(root, relativeDirectory);
+  if (!isInside(root, directory)) throw new Error("导入目标必须在当前素材文件夹内");
+  const realRoot = await fs.promises.realpath(root);
+  let ancestor = directory;
+  while (!fs.existsSync(ancestor)) ancestor = path.dirname(ancestor);
+  if (!isInside(realRoot, await fs.promises.realpath(ancestor))) throw new Error("导入目标超出当前素材文件夹");
+  await fs.promises.mkdir(directory, { recursive: true });
+  const realDirectory = await fs.promises.realpath(directory);
+  if (!isInside(realRoot, realDirectory)) throw new Error("导入目标超出当前素材文件夹");
+  return { directory, realDirectory };
+}
+
+async function moveFilesToDirectory(rootPath, sourcePaths, relativeDirectory, onMoved = () => {}) {
+  const { directory, realDirectory } = await prepareImportDirectory(rootPath, relativeDirectory);
+  const moved = [];
+  for (const sourcePath of [...new Set(sourcePaths)]) {
+    const before = await fs.promises.lstat(sourcePath).catch(() => null);
+    if (!before?.isFile()) continue;
+    const originalDestination = path.join(realDirectory, path.basename(sourcePath));
+    const realSource = await fs.promises.realpath(sourcePath);
+    if (process.platform === "win32" ? realSource.toLowerCase() === originalDestination.toLowerCase() : realSource === originalDestination) continue;
+    let destination;
+    let copied = false;
+    const parsed = path.parse(path.basename(sourcePath));
+    let suffix = 1;
+    for (;;) {
+      destination = path.join(directory, suffix === 1 ? parsed.base : `${parsed.name}_${suffix}${parsed.ext}`);
+      try {
+        // link() reserves a same-volume destination atomically without replacing an existing file.
+        try { await fs.promises.link(sourcePath, destination); }
+        catch (error) {
+          if (!["EXDEV", "EPERM", "EACCES", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"].includes(error.code)) throw error;
+          await fs.promises.copyFile(sourcePath, destination, fs.constants.COPYFILE_EXCL);
+          copied = true;
+        }
+        break;
+      } catch (error) {
+        if (error.code === "EEXIST") { suffix += 1; continue; }
+        throw error;
+      }
+    }
+    try {
+      if (copied) await fs.promises.utimes(destination, before.atime, before.mtime);
+      const current = await fs.promises.lstat(sourcePath);
+      if (!current.isFile() || current.dev !== before.dev || current.ino !== before.ino
+        || current.size !== before.size || current.mtimeMs !== before.mtimeMs || current.birthtimeMs !== before.birthtimeMs) {
+        throw new Error("原文件在移动过程中发生变化，请等待下载或保存完成后重试");
+      }
+      await fs.promises.unlink(sourcePath);
+    } catch (error) {
+      try { await fs.promises.unlink(destination); }
+      catch { throw new Error(`原文件未移动，目标副本暂时无法清理：${destination}`); }
+      throw error;
+    }
+    moved.push(destination);
+    onMoved({ source: sourcePath, destination });
+  }
+  return moved;
+}
+
 async function describePaths(sourcePaths) {
   const results = [];
   for (const sourcePath of sourcePaths || []) {
@@ -211,7 +293,7 @@ async function describePaths(sourcePaths) {
   return results;
 }
 
-async function organizeFile(rootPath, filePath, target) {
+async function organizeFile(rootPath, filePath, target, customAreas = []) {
   const root = await assertDirectory(rootPath);
   const source = path.resolve(filePath);
   if (!isInside(root, source)) throw new Error("链接项目中的文件请在原文件夹里整理");
@@ -225,10 +307,8 @@ async function organizeFile(rootPath, filePath, target) {
       ["参考素材", "制作素材"].includes(target.mode) ? target.mode : "制作素材",
       safeSegment(target.category, "源文件"),
     ];
-  } else if (target.area === "下载素材") {
-    parts = ["01_素材", "下载素材", safeSegment(target.category, "未分类")];
-  } else if (target.area === "AI制作素材") {
-    parts = ["01_素材", "AI制作素材", safeSegment(target.category, "未分类")];
+  } else if (isMaterialArea(target.area, customAreas)) {
+    parts = ["01_素材", target.area, safeSegment(target.category, "未分类")];
   } else if (target.area === "项目素材") {
     parts = [
       "02_项目素材",
@@ -242,23 +322,21 @@ async function organizeFile(rootPath, filePath, target) {
 
   const directory = path.join(root, ...parts);
   if (path.dirname(source) === directory) return source;
-  await fs.promises.mkdir(directory, { recursive: true });
-  const destination = uniqueDestination(directory, path.basename(source));
-  try {
-    await fs.promises.rename(source, destination);
-  } catch (error) {
-    if (error?.code !== "EXDEV") throw error;
-    await fs.promises.copyFile(source, destination, fs.constants.COPYFILE_EXCL);
-    await fs.promises.unlink(source);
-  }
-  return destination;
+  await validateFilesInsideRoot(root, [source]);
+  const moved = await moveFilesToDirectory(root, [source], path.relative(root, directory));
+  return moved[0] || source;
 }
 
-async function organizeFiles(rootPath, filePaths, target) {
+async function organizeFiles(rootPath, filePaths, target, customAreas = []) {
   const moved = [];
-  for (const filePath of filePaths || []) {
-    const destination = await organizeFile(rootPath, filePath, target);
-    moved.push({ source: filePath, destination });
+  try {
+    for (const filePath of filePaths || []) {
+      const destination = await organizeFile(rootPath, filePath, target, customAreas);
+      moved.push({ source: filePath, destination });
+    }
+  } catch (error) {
+    error.moves = moved;
+    throw error;
   }
   return moved;
 }
@@ -288,8 +366,10 @@ module.exports = {
   IMAGE_EXTENSIONS,
   assertDirectory,
   copyFilesToArea,
+  moveFilesToDirectory,
   copyFilesToInbox,
   describePaths,
+  descriptorForFile,
   ensureLibraryStructure,
   organizeFile,
   organizeFiles,

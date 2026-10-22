@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   base: "./",
+  cacheDir: ".vite-cache",
   build: {
     outDir: "dist/client",
   },

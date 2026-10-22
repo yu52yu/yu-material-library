@@ -42,3 +42,34 @@ test('bounds parallel generation and retries failed jobs', async () => {
     for (const source of sources) assert.equal((await get(source)).toString(), 'png');
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
+
+test('evicts old overwrite variants under the disk cap and clear cannot repopulate from in-flight work', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'yu-thumb-cap-'));
+  try {
+    const source = path.join(root, 'original.png');
+    const directory = path.join(root, 'cache');
+    const get = createThumbnailCache(directory, async () => Buffer.from('12345678'), { maxBytes: 14 });
+    for (let index = 0; index < 6; index++) {
+      await fs.writeFile(source, 'original'.repeat(index + 1));
+      await get(source);
+      assert.ok((await get.info()).bytes <= 14);
+    }
+    assert.equal((await fs.readdir(directory)).filter(name => name.endsWith('.png')).length, 1);
+    let release;
+    let signal;
+    const started = new Promise(resolve => { signal = resolve; });
+    const blocked = createThumbnailCache(directory, async () => {
+      signal();
+      await new Promise(resolve => { release = resolve; });
+      return Buffer.from('pending');
+    }, { maxBytes: 14 });
+    await fs.writeFile(source, 'new version');
+    const pending = blocked(source);
+    await started;
+    await blocked.clear();
+    release();
+    assert.equal((await pending).toString(), 'pending');
+    assert.equal((await blocked.info()).bytes, 0);
+    assert.equal(await fs.readFile(source, 'utf8'), 'new version');
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});

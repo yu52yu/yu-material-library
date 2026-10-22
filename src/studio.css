@@ -37,7 +37,7 @@ button:disabled { cursor: default; opacity: .45; }
 .brand img { background: transparent; padding: 0; border-radius: 0; }
 .brand span { color: #262d3c; font-weight: 700; font-size: 21px; }
 .sidebar .nav-item { position: relative; color: #566174; margin-bottom: 4px; border-radius: 10px; }
-.sidebar .nav-item:hover { color: #303e58; background: #e4e9f3; transform: translateX(2px); }
+.sidebar .nav-item:hover { color: #303e58; background: #e4e9f3; }
 .sidebar .nav-item.active { color: #303e58; background: linear-gradient(115deg, #ffffff, #e0e7f5); box-shadow: inset 0 0 0 1px #cad4e5, 0 5px 14px #2739580d; }
 .nav-item::before { content: ""; position: absolute; left: 0; top: 13px; bottom: 13px; width: 3px; border-radius: 3px; background: #7b8fae; transform: scaleY(0); transition: transform 240ms var(--ease-studio); }
 .nav-item.active::before { transform: scaleY(1); }

@@ -1,0 +1,8 @@
+{
+  "image": "jpg jpeg png gif webp bmp tif tiff svg avif heic heif ico exr hdr dng cr2 nef arw",
+  "video": "mp4 mov avi mkv webm m4v wmv mpg mpeg m2ts mts flv ogv 3gp",
+  "audio": "mp3 wav flac aac ogg m4a aiff aif wma opus mid midi",
+  "source": "psd psb ai cdr eps blend blend1 c4d max ma mb fbx obj stp step skp 3ds stl prproj aep aepx drp fig sketch xd indd idml afdesign afphoto afpub substance sbs sbsar",
+  "document": "pdf txt md rtf doc docx xls xlsx csv tsv ppt pptx odt ods odp epub",
+  "font": "ttf otf woff woff2 ttc eot"
+}
