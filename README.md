@@ -2,7 +2,7 @@
 
 Windows 本地设计素材管理工具。原文件保存在你自己选择的本地文件夹中，分类、标签和备注另存为本机整理资料库；本仓库只保存程序源码和界面资源，不同步本地素材或设置。
 
-**当前源码版本：v1.1.0。** 新增自定义顶层素材区，方便单独管理与项目无关的个人作品，保留独立资料库功能、紧凑标题布局及侧栏抖动修复。[Windows x64 安装包](https://github.com/yu52yu/yu-material-library/releases/download/v1.1.0/YuMaterialLibrary-1.1.0-Setup.exe) · [v1.1.0 发布页](https://github.com/yu52yu/yu-material-library/releases/tag/v1.1.0)。详情见 [安装说明](安装说明.md)。
+**2026-10-22：v1.1.0 源码与安装包已同步至 GitHub，Release 已设为最新版。** 新增自定义顶层素材区，方便单独管理与项目无关的个人作品，保留独立资料库功能、紧凑标题布局及侧栏抖动修复。[Windows x64 安装包](https://github.com/yu52yu/yu-material-library/releases/download/v1.1.0/YuMaterialLibrary-1.1.0-Setup.exe) · [v1.1.0 发布页](https://github.com/yu52yu/yu-material-library/releases/tag/v1.1.0)。详情见 [安装说明](安装说明.md)。
 
 ## v1.1.0 功能
 
