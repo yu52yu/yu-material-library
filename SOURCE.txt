@@ -1,0 +1,16 @@
+Yu Material Library / 瑜の素材库 v1.1.0
+Copyright (C) 2026 yu52yu.
+
+This application is free software, licensed under GNU GPL version 3 only.
+It is distributed without any warranty. See LICENSE-GPL-3.0.txt for the
+complete license, including the warranty disclaimer.
+
+Corresponding source code for this version, including build instructions:
+https://github.com/yu52yu/yu-material-library/tree/v1.1.0
+https://github.com/yu52yu/yu-material-library/archive/refs/tags/v1.1.0.zip
+
+Build instructions: 安装说明.md in the source archive.
+Third-party notices: THIRD-PARTY-NOTICES.txt, LICENSE.electron.txt,
+and LICENSES.chromium.html in this installation directory.
+
+Your own material files and local catalog data are not part of this release.

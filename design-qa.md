@@ -2,10 +2,10 @@
 
 ## Comparison target
 
-- Source visual truth: `C:\Users\thinkpad\Documents\ChatGPT\本地素材库\yu-material-library\design\reference-ui.png`
-- Browser-rendered implementation: `C:\Users\thinkpad\Documents\ChatGPT\本地素材库\yu-material-library\design\implementation-empty-state.png`
-- Full-view comparison: `C:\Users\thinkpad\Documents\ChatGPT\本地素材库\yu-material-library\design\qa-comparison.png`
-- Focused brand/header comparison: `C:\Users\thinkpad\Documents\ChatGPT\本地素材库\yu-material-library\design\qa-focus-brand-header.png`
+- Source visual truth: `design/reference-ui.png`
+- Browser-rendered implementation: `design/implementation-empty-state.png`
+- Full-view comparison: `design/qa-comparison.png`
+- Focused brand/header comparison: `design/qa-focus-brand-header.png`
 - Browser URL: `http://localhost:4173/`
 - State: first-run empty library, no user folder connected.
 

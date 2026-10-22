@@ -36,7 +36,13 @@
       "dist/client/**/*",
       "electron/**/*",
       "build/knight-silver.ico",
-      "package.json"
+      "package.json",
+      "LICENSE"
+    ],
+    "extraFiles": [
+      { "from": "LICENSE", "to": "LICENSE-GPL-3.0.txt" },
+      "SOURCE.txt",
+      "THIRD-PARTY-NOTICES.txt"
     ],
     "directories": {
       "output": "release"
@@ -55,5 +61,6 @@
       "createStartMenuShortcut": true,
       "shortcutName": "瑜の素材库"
     }
-  }
+  },
+  "license": "GPL-3.0-only"
 }
